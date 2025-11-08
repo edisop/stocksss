@@ -713,7 +713,7 @@ def create_investment_plan(
     date: str = DEFAULT_OVERRIDE_DATE,
     temp: float = DEFAULT_TEMP,
 ) -> Dict[str, Any]:
-    """Create a new plan, compute buy prices & quantities, and persist it."""
+    #Create a new plan, compute buy prices & quantities, and persist it.
     import yfinance as yf
 
     payload = build_payload_remote.remote(

@@ -917,7 +917,7 @@ def list_plans() -> Dict[str, Any]:
 @app.function(image=base_image, volumes={"/vol/plans": PLANS_VOL})
 @modal.web_endpoint(method="GET")
 def get_plan_with_live(id: Optional[str] = None) -> Dict[str, Any]:
-    """Return chosen plan with live prices & PnL. If none exist, create one."""
+    #Return chosen plan with live prices & PnL. If none exist, create one.
     plan_id = id
     if not plan_id:
         pid = _latest_plan_id()

@@ -28,8 +28,8 @@ import streamlit as st
 import pandas as pd
 
 # ---- Optional: hardcode tokens here (fallback if env/secrets missing) ----
-MODAL_TOKEN_ID_HARDCODE = os.getenv("MODAL_TOKEN_ID_HARDCODE", "")
-MODAL_TOKEN_SECRET_HARDCODE = os.getenv("MODAL_TOKEN_SECRET_HARDCODE", "")
+MODAL_TOKEN_ID_HARDCODE = os.getenv("MODAL_TOKEN_ID_HARDCODE", "ak-FEiBFqRU5O7Ka5uw5dAb1U")
+MODAL_TOKEN_SECRET_HARDCODE = os.getenv("MODAL_TOKEN_SECRET_HARDCODE", "as-Rzw36potqKmoJ9RDugsM9O")
 
 # ---- Modal SDK setup ----
 import modal

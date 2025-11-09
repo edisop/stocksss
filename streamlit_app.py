@@ -46,14 +46,6 @@ if hasattr(st, 'secrets'):
         if k in st.secrets:
             os.environ[k] = str(st.secrets[k])
 
-# --- Hardcoded Modal tokens (fallback ONLY; not recommended for public repos) ---
-MODAL_TOKEN_ID_HARDCODE = os.getenv('MODAL_TOKEN_ID_HARDCODE', 'ak-FEiBFqRU5O7Ka5uw5dAb1U')
-MODAL_TOKEN_SECRET_HARDCODE = os.getenv('MODAL_TOKEN_SECRET_HARDCODE', 'as-Rzw36potqKmoJ9RDugsM9O')
-if not os.getenv('MODAL_TOKEN_ID'):
-    os.environ['MODAL_TOKEN_ID'] = MODAL_TOKEN_ID_HARDCODE
-if not os.getenv('MODAL_TOKEN_SECRET'):
-    os.environ['MODAL_TOKEN_SECRET'] = MODAL_TOKEN_SECRET_HARDCODE
-
 # Light price fetch
 try:
     import yfinance as yf

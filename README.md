@@ -50,7 +50,7 @@ We use two volumes (created on-demand by your app code):
 **Windows (PowerShell):**
 ```powershell
 # Example paths — change to your actual checkpoint file
-$LOCAL_CKPT = "C:\Users\edwar\Desktop\Stock_data\Training\proj_az_leg711_batch1\biex_listmle_final.pt"
+$LOCAL_CKPT = "C:\Users\name\Desktop\Stock_data\Training\proj_az_leg711_batch1\biex_listmle_final.pt"
 modal volume put model-cache "$LOCAL_CKPT" /ckpts/biex_listmle_final.pt
 ```
 

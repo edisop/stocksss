@@ -1,27 +1,21 @@
 # modal_infer_inmemory_latest.py
-# Modalized "latest-day" inference + plan storage + web endpoints for Streamlit
+# Modalized "latest-day" inference:
 # - CPU function builds texts in memory (no files)
 # - GPU function loads your ckpt from a Modal Volume and scores items
-# - "Plan" = top-k allocation with buy prices & quantities recorded at creation
-# - Daily cron at 9am Australia/Melbourne creates a new plan
-# - Web endpoints:
-#     GET /list_plans              -> list available plans (oldest -> latest)
-#     GET /get_plan_with_live      -> latest plan with live prices & P&L
-#     GET /get_plan_with_live?id=PLAN_ID -> chosen plan with live prices & P&L
+# - Prints a nice top-k allocation table
 #
-# Volumes expected:
-#   - model-cache (v2): contains your checkpoint at /ckpts/...
-#   - code-cache  (v1): contains /pkgs/interfusion_encoder-3.1 or .whl
-#   - plans-cache (v1): this script will create JSON files in /vol/plans
+# Requires:
+#   - Modal CLI authed locally:  modal token new
+#   - Volume "model-cache" (v2) containing your checkpoint at /ckpts/...
+#   - Volume "code-cache"  (v1) containing /pkgs/interfusion_encoder-3.1
 #
-# Deploy:
-#   modal deploy modal_infer_inmemory_latest.py
-#
-# Local smoke test:
-#   modal run modal_infer_inmemory_latest.py
-#   (then curl the printed web URLs)
-from __future__ import annotations
+# Run (flags optional because we hard-code defaults below):
+#   modal run modal_infer_inmemory_latest.py -- ^
+#     --ckpt /vol/models/ckpts/biex_listmle_final.pt ^
+#     --invest_amt 1000 ^
+#     --top_k 20
 
+from __future__ import annotations
 import os, re, math, time, json, warnings
 from typing import List, Dict, Tuple, Optional, Any
 from dataclasses import dataclass
@@ -30,6 +24,8 @@ import modal
 
 # ============================================================
 #                === CHANGE-ME DEFAULTS (edit here) ===
+#    These mirror your typical CLI values so you can just
+#    `modal run` without passing flags every time.
 # ============================================================
 DEFAULT_CKPT: str = "/vol/models/ckpts/biex_listmle_final.pt"
 DEFAULT_INVEST_AMT: float = 1000.0
@@ -59,10 +55,11 @@ DEFAULT_FINNHUB_KEYS = [
 # -----------------------------
 app = modal.App("inmemory-latest-infer")
 
+# Base image with common deps (NO local file adds here)
 base_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        # build helpers
+        # build helpers (in case your uploaded package uses pyproject/setuptools)
         "pip>=25.0", "setuptools>=70", "wheel>=0.43",
         # data + utils
         "pandas>=2.2", "numpy>=1.26", "tqdm>=4.66",
@@ -73,16 +70,20 @@ base_image = (
     )
 )
 
-gpu_image = base_image.pip_install("torch==2.5.*")
+gpu_image = (
+    base_image
+    .pip_install("torch==2.5.*")  # works on Modal GPU runners
+)
 
+# Persistent volumes
 MODEL_VOL = modal.Volume.from_name("model-cache", create_if_missing=True, version=2)
 CODE_VOL  = modal.Volume.from_name("code-cache",  create_if_missing=False, version=1)
-PLANS_VOL = modal.Volume.from_name("plans-cache", create_if_missing=True, version=1)
 
 # -----------------------------
-# Static config
+# Static config (unchanged)
 # -----------------------------
 TICKERS_UNIVERSE = [
+    # (same universe you pasted; kept as-is)
     'APTV','KEYS','LII','YUM','BX','MSCI','NKE','WELL','NVR','RJF','BF-B','GWW','NCLH','JCI','URI','SPGI','BLDR','INTU',
     'BXP','DOV','FTNT','MDT','LVS','STE','TROW','MAS','BG','ALB','CRM','HAL','PKG','VRTX','HRL','DLR','DAL','MLM','AON',
     'GE','NWS','AMZN','LUV','C','SBUX','AIG','SHW','KEY','AME','EBAY','DECK','MRK','L','EQIX','NTAP','COIN','VICI','LH',
@@ -121,7 +122,7 @@ PRICE_LOOKBACK_DAYS   = 120
 SLEEP_BETWEEN_NEWS_TICKERS = float(os.getenv("SLEEP_BETWEEN_NEWS_TICKERS", "0.10"))
 
 # ============================================================
-#               Helpers
+#               Helpers (unchanged from your script)
 # ============================================================
 import pandas as pd
 import numpy as np
@@ -286,6 +287,7 @@ def _flatten_prices_multi(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     out: Dict[str, pd.DataFrame] = {}
     if df is None or df.empty: return out
     if isinstance(df.columns, pd.MultiIndex):
+        # Only create entries for tickers that actually returned data
         for ticker in sorted(set(lvl for lvl in df.columns.get_level_values(0) if isinstance(lvl, str))):
             sub = df[ticker].copy()
             sub.index = pd.to_datetime(sub.index)
@@ -310,62 +312,13 @@ def _effective_utc_date_for_infer() -> str:
     use = now_utc.date() if now_utc.hour >= UTC_ROLLOVER_HOUR else (now_utc - pd.Timedelta(days=1)).date()
     return pd.Timestamp(use).strftime("%Y-%m-%d")
 
-# ---------- Plan storage helpers (on /vol/plans) ----------
-def _plans_dir() -> str:
-    p = "/vol/plans"
-    os.makedirs(p, exist_ok=True)
-    return p
-
-def _plan_path(plan_id: str) -> str:
-    return os.path.join(_plans_dir(), f"{plan_id}.json")
-
-def _list_plan_files() -> List[str]:
-    d = _plans_dir()
-    try:
-        return sorted([f for f in os.listdir(d) if f.endswith(".json")])
-    except FileNotFoundError:
-        return []
-
-def _load_plan(plan_id: str) -> Optional[Dict[str, Any]]:
-    path = _plan_path(plan_id)
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def _save_plan(plan: Dict[str, Any]) -> None:
-    path = _plan_path(plan["plan_id"])
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(plan, f, separators=(",", ":"), ensure_ascii=False)
-
-def _list_plans_meta() -> List[Dict[str, Any]]:
-    out = []
-    for fn in _list_plan_files():
-        try:
-            with open(os.path.join(_plans_dir(), fn), "r", encoding="utf-8") as f:
-                p = json.load(f)
-            out.append({
-                "plan_id": p.get("plan_id"),
-                "date": p.get("date"),
-                "created_at": p.get("created_at"),
-                "label": f"{p.get('date')} (created {p.get('created_at')})",
-            })
-        except Exception:
-            continue
-    out = [x for x in out if x.get("plan_id")]
-    out.sort(key=lambda r: r.get("created_at") or "")
-    return out
-
-def _latest_plan_id() -> Optional[str]:
-    metas = _list_plans_meta()
-    if not metas:
-        return None
-    return metas[-1]["plan_id"]
-
 # ============================================================
 #                Remote: CPU fetcher (build texts)
 # ============================================================
-@app.function(image=base_image, timeout=60*20)
+@app.function(
+    image=base_image,
+    timeout=60 * 20,
+)
 def build_payload_remote(
     for_date: str | None,
     tickers: List[str],
@@ -375,23 +328,30 @@ def build_payload_remote(
     import finnhub
     from tqdm import tqdm as _tqdm
 
+    # resolve date with rollover
     date_eff = (for_date or "").strip() or _effective_utc_date_for_infer()
 
+    # --- prices (tolerant to missing symbols) ---
     start = (pd.to_datetime(date_eff) - pd.Timedelta(days=PRICE_LOOKBACK_DAYS + 5)).strftime("%Y-%m-%d")
     end   = (pd.to_datetime(date_eff) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     all_syms = list(dict.fromkeys(tickers + ["^GSPC", "^VIX"]))
+    # yfinance will warn on failures; we just flatten whatever arrives
     data = yf.download(all_syms, start=start, end=end, auto_adjust=True, progress=False, group_by="ticker", threads=True)
     px = _flatten_prices_multi(data)
 
+    # clamp to last ^GSPC date if needed (if market closed / weekend)
     g = px.get("^GSPC")
     if g is not None and not g.empty:
         last_px_date = pd.to_datetime(g.index.max()).strftime("%Y-%m-%d")
         if pd.to_datetime(date_eff) > pd.to_datetime(last_px_date):
             date_eff = last_px_date
 
+    # --- headlines (7d window) ---
     key_list = list(DEFAULT_FINNHUB_KEYS)
     if not key_list:
         raise RuntimeError("DEFAULT_FINNHUB_KEYS is empty.")
+
+    # simple round-robin client
     clients = [finnhub.Client(api_key=k) for k in key_list]
     idx = 0
 
@@ -433,6 +393,8 @@ def build_payload_remote(
         news_by_ticker[t] = df
         time.sleep(SLEEP_BETWEEN_NEWS_TICKERS)
 
+    # --- build user/item texts (in memory) ---
+    # MARKET aggregate across all tickers (FIX: use a LIST for column selection)
     frames = []
     for t in tickers:
         df = news_by_ticker.get(t)
@@ -440,6 +402,7 @@ def build_payload_remote(
             frames.append(df[["datetime","headline","norm","source"]])
     mkt_agg = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["datetime","headline","norm","source"])
 
+    # market text
     def _market_text(for_date: str, mkt_agg: pd.DataFrame, px: Dict[str, pd.DataFrame], k1: int = 100, k7: int = 100):
         hdr = f"CTX:MARKET | DATE:{for_date}\n" + _market_macro_block(for_date, px)
         if mkt_agg is None or mkt_agg.empty:
@@ -452,6 +415,7 @@ def build_payload_remote(
         hdr += "\nNEWS_7D_EXCLUDING_1D:\n" + _format_lines(m7["headline"].tolist())
         return hdr, int(len(m1)), int(len(m7))
 
+    # per-stock text
     def _stock_text(ticker: str, for_date: str, news_df: pd.DataFrame, px: Dict[str, pd.DataFrame], k1: int = 80, k7: int = 160):
         base = f"CTX:STOCK | TICKER:{ticker} | DATE:{for_date}\n" + _stock_indicators(ticker, for_date, px)
         if news_df is None or news_df.empty:
@@ -483,9 +447,9 @@ def build_payload_remote(
 # ============================================================
 @app.function(
     image=gpu_image,
-    gpu=["L4", "A10", "any"],
+    gpu=["L4", "A10", "any"],   # prefer L4; fall back to A10/any
     volumes={"/vol/models": MODEL_VOL, "/vol/code": CODE_VOL},
-    timeout=60*20,
+    timeout=60 * 20,
 )
 def run_infer_remote(
     payload: Dict[str, Any],
@@ -495,6 +459,7 @@ def run_infer_remote(
     device_choice: str = "auto",
     temp: float = 2.0,
 ) -> Dict[str, Any]:
+    # --- ensure your uploaded package is installed (from code-cache volume) ---
     def _ensure_interfusion_installed():
         try:
             import interfusion  # noqa: F401
@@ -505,6 +470,7 @@ def run_infer_remote(
             src_path   = "/vol/code/pkgs/interfusion_encoder-3.1"
             target = wheel_path if os.path.exists(wheel_path) else src_path
             subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", target])
+
     _ensure_interfusion_installed()
 
     import torch
@@ -527,12 +493,15 @@ def run_infer_remote(
             kw["weights_only"] = False
         return torch.load(path, **kw)
 
+    # unpack payload
     user_record = payload["user_record"]
     item_records = payload["item_records"]
     date_eff = payload["date_eff"]
 
+    # device
     device = "cuda" if (device_choice == "auto" and torch.cuda.is_available()) else (device_choice if device_choice != "auto" else "cpu")
 
+    # load checkpoint + construct model
     ckpt = _torch_load_weights_only_false(ckpt_path)
     cfg = dict(ckpt.get("config", {}))
     cfg["device"] = device
@@ -560,6 +529,7 @@ def run_infer_remote(
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     model.eval(); news_enc.eval()
 
+    # numeric scalers
     u_std = Standardizer(); i_std = Standardizer()
     nm = ckpt.get("numeric_stats", {})
     if nm:
@@ -568,6 +538,7 @@ def run_infer_remote(
         if nm.get("item_mean") is not None: i_std.mean = np.asarray(nm["item_mean"], dtype=np.float32)
         if nm.get("item_std")  is not None: i_std.std  = np.asarray(nm["item_std"],  dtype=np.float32)
 
+    # parse & encode
     tqdmm = get_tqdm(cfg)
     user_parsed, item_parsed = build_parsed_maps(user_record, item_records, u_std, i_std, tqdmm)
 
@@ -652,29 +623,25 @@ def run_infer_remote(
     }
 
 # ============================================================
-#     Plan creation (+ buy prices & quantities) on CPU
+#               Local entrypoint (CLI)
 # ============================================================
-@app.function(
-    image=base_image,
-    volumes={"/vol/plans": PLANS_VOL},
-    timeout=60*25,
-)
-def create_investment_plan(
+@app.local_entrypoint()
+def main(
     ckpt: str = DEFAULT_CKPT,
     invest_amt: float = DEFAULT_INVEST_AMT,
     top_k: int = DEFAULT_TOP_K,
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
-    date: str = DEFAULT_OVERRIDE_DATE,
-    temp: float = DEFAULT_TEMP,
-) -> Dict[str, Any]:
-    """Create a new plan, compute buy prices & quantities, and persist it."""
-    import yfinance as yf
-
+    date: str = DEFAULT_OVERRIDE_DATE,  # YYYY-MM-DD; empty -> auto rollover
+    temp: float = DEFAULT_TEMP,         # softmax temperature
+):
+    # 1) Build texts on CPU container (no files)
     payload = build_payload_remote.remote(
         for_date=date or None,
         tickers=TICKERS_UNIVERSE,
         max_candidates=int(max_candidates),
     )
+
+    # 2) Score on GPU container
     result = run_infer_remote.remote(
         payload=payload,
         ckpt_path=ckpt,
@@ -683,236 +650,16 @@ def create_investment_plan(
         temp=float(temp),
     )
 
-    # Collect tickers in this plan
-    tickers = [r["ticker"] for r in result["rows"]]
-
-    # Get best-effort "current" price at plan time:
-    # prefer 1m data for today; if empty, fall back to 1d
-    def _last_close_map(tickers: List[str]) -> Dict[str, Optional[float]]:
-        if not tickers:
-            return {}
-        try:
-            d1m = yf.download(tickers, period="1d", interval="1m", group_by="ticker", progress=False, threads=True, auto_adjust=False)
-        except Exception:
-            d1m = None
-        if d1m is None or isinstance(d1m, pd.DataFrame) and d1m.empty:
-            try:
-                d1d = yf.download(tickers, period="1d", interval="1d", group_by="ticker", progress=False, threads=True, auto_adjust=False)
-            except Exception:
-                d1d = None
-        else:
-            d1d = None
-
-        price_map: Dict[str, Optional[float]] = {t: None for t in tickers}
-
-        def _extract(df: pd.DataFrame) -> Dict[str, float]:
-            out = {}
-            if df is None or df.empty:
-                return out
-            if isinstance(df.columns, pd.MultiIndex):
-                for t in set(df.columns.get_level_values(0)):
-                    if not isinstance(t, str): 
-                        continue
-                    sub = df[t]
-                    if "Close" in sub and not sub["Close"].empty:
-                        out[t] = float(sub["Close"].iloc[-1])
-            else:
-                if "Close" in df and not df["Close"].empty:
-                    out["SINGLE"] = float(df["Close"].iloc[-1])
-            return out
-
-        m1 = _extract(d1m) if d1m is not None else {}
-        m2 = _extract(d1d) if d1d is not None else {}
-        for t in tickers:
-            if t in m1 and m1[t] is not None:
-                price_map[t] = float(m1[t])
-            elif t in m2 and m2[t] is not None:
-                price_map[t] = float(m2[t])
-            else:
-                price_map[t] = None
-        return price_map
-
-    price_map = _last_close_map(tickers)
-
-    rows_out = []
-    for row in result["rows"]:
-        tk = row["ticker"]
-        alloc = float(row["allocation"])
-        buy_price = price_map.get(tk)
-        if buy_price is None or buy_price <= 0:
-            quantity = None
-        else:
-            quantity = alloc / buy_price
-        rows_out.append({
-            **row,
-            "buy_price": buy_price,
-            "quantity": quantity,
-        })
-
-    now_utc = pd.Timestamp.utcnow()
-    plan_id = f"{result['date']}_{now_utc.strftime('%Y%m%dT%H%M%SZ')}"
-    plan = {
-        "plan_id": plan_id,
-        "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "date": result["date"],
-        "k": result["k"],
-        "temp": result["temp"],
-        "invest_amt": result["invest_amt"],
-        "rows": rows_out,
-        "sum_weights": result["sum_weights"],
-        "sum_allocation": result["sum_allocation"],
-    }
-    _save_plan(plan)
-    return plan
-
-# ============================================================
-#    Attach live prices & compute PnL for a stored plan
-# ============================================================
-@app.function(image=base_image, volumes={"/vol/plans": PLANS_VOL}, timeout=60*20)
-def _attach_live_prices_and_pnl(plan: Dict[str, Any]) -> Dict[str, Any]:
-    import yfinance as yf
-
-    tickers = [r["ticker"] for r in plan.get("rows", [])]
-    if not tickers:
-        return {"plan": plan, "rows": [], "total_cost": 0.0, "total_value": 0.0, "total_pnl": 0.0, "total_pnl_pct": 0.0}
-
-    def _live_price_map(tickers: List[str]) -> Dict[str, Optional[float]]:
-        # Try 1m first, then fall back to 1d
-        try:
-            d1m = yf.download(tickers, period="1d", interval="1m", group_by="ticker", progress=False, threads=True, auto_adjust=False)
-        except Exception:
-            d1m = None
-        if d1m is None or (isinstance(d1m, pd.DataFrame) and d1m.empty):
-            try:
-                d1d = yf.download(tickers, period="1d", interval="1d", group_by="ticker", progress=False, threads=True, auto_adjust=False)
-            except Exception:
-                d1d = None
-        else:
-            d1d = None
-
-        price_map: Dict[str, Optional[float]] = {t: None for t in tickers}
-
-        def _extract(df: pd.DataFrame) -> Dict[str, float]:
-            out = {}
-            if df is None or df.empty:
-                return out
-            if isinstance(df.columns, pd.MultiIndex):
-                for t in set(df.columns.get_level_values(0)):
-                    if not isinstance(t, str): continue
-                    sub = df[t]
-                    if "Close" in sub and not sub["Close"].empty:
-                        out[t] = float(sub["Close"].iloc[-1])
-            else:
-                if "Close" in df and not df["Close"].empty:
-                    out["SINGLE"] = float(df["Close"].iloc[-1])
-            return out
-
-        m1 = _extract(d1m) if d1m is not None else {}
-        m2 = _extract(d1d) if d1d is not None else {}
-        for t in tickers:
-            if t in m1 and m1[t] is not None:
-                price_map[t] = float(m1[t])
-            elif t in m2 and m2[t] is not None:
-                price_map[t] = float(m2[t])
-            else:
-                price_map[t] = None
-        return price_map
-
-    price_map = _live_price_map(tickers)
-
-    rows = []
-    total_cost = 0.0
-    total_value = 0.0
-
-    for r in plan.get("rows", []):
-        tk = r["ticker"]
-        buy_price = r.get("buy_price")
-        qty = r.get("quantity")
-        live_price = price_map.get(tk)
-
-        if buy_price is None or qty is None or live_price is None:
-            position_value = None
-            pnl = None
-            pnl_pct = None
-            cost = 0.0
-        else:
-            cost = float(buy_price) * float(qty)
-            position_value = float(live_price) * float(qty)
-            pnl = position_value - cost
-            pnl_pct = (position_value / cost - 1.0) * 100.0
-            total_cost += cost
-            total_value += position_value
-
-        rows.append({
-            **r,
-            "live_price": live_price,
-            "position_value": position_value,
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
-        })
-
-    total_pnl = total_value - total_cost
-    total_pnl_pct = (total_value / total_cost - 1.0) * 100.0 if total_cost > 0 else 0.0
-
-    return {
-        "plan": plan,
-        "rows": rows,
-        "total_cost": total_cost,
-        "total_value": total_value,
-        "total_pnl": total_pnl,
-        "total_pnl_pct": total_pnl_pct,
-    }
-
-# ============================================================
-#                    Web endpoints (HTTP)
-# ============================================================
-@app.function(image=base_image, volumes={"/vol/plans": PLANS_VOL})
-@modal.web_endpoint(method="GET")
-def list_plans() -> Dict[str, Any]:
-    metas = _list_plans_meta()
-    return {"plans": metas}
-
-@app.function(image=base_image, volumes={"/vol/plans": PLANS_VOL})
-@modal.web_endpoint(method="GET")
-def get_plan_with_live(id: Optional[str] = None) -> Dict[str, Any]:
-    """Return chosen plan with live prices & PnL. If none exist, create one."""
-    plan_id = id
-    if not plan_id:
-        pid = _latest_plan_id()
-        if not pid:
-            # Create first plan
-            plan = create_investment_plan.remote()
-            return _attach_live_prices_and_pnl.remote(plan)
-        plan_id = pid
-
-    plan = _load_plan(plan_id)
-    if plan is None:
-        # If missing, lazily create a plan now
-        plan = create_investment_plan.remote()
-    return _attach_live_prices_and_pnl.remote(plan)
-
-# ============================================================
-#        Daily schedule at 9am Australia/Melbourne
-# ============================================================
-@app.function(
-    schedule=modal.Cron("0 9 * * *", timezone="Australia/Melbourne"),
-    image=base_image,
-    volumes={"/vol/plans": PLANS_VOL},
-    timeout=60*30,
-)
-def scheduled_daily_plan():
-    return create_investment_plan.remote()
-
-# ============================================================
-#               Local entrypoint (manual trigger)
-# ============================================================
-@app.local_entrypoint()
-def main():
-    # Manual: create a plan and print its ID, and show the two web URLs
-    plan = create_investment_plan.remote()
-    metas = _list_plans_meta()
-    print("Created plan_id:", plan["plan_id"])
-    print("Total plans:", len(metas))
-    print("List plans URL   : /list_plans")
-    print("Get latest plan  : /get_plan_with_live")
-    print("Get a specific   : /get_plan_with_live?id=<PLAN_ID>")
+    # 3) Pretty print locally
+    print(f"\n=== Inference — DATE={result['date']} — top-{result['k']} allocation (temp={result['temp']:.3f}, invest=${result['invest_amt']:.2f}) ===")
+    print("{:>4s}  {:<10s}  {:<18s}  {:>11s}  {:>10s}  {:>12s}".format(
+        "Rank","Ticker","ItemID","Score","Weight","Allocation"
+    ))
+    for r in result["rows"]:
+        print("{:>4d}  {:<10s}  {:<18s}  {:>11.6f}  {:>9.6f}  ${:>11.2f}".format(
+            r["rank"], r["ticker"], r["item_id"], r["score"], r["weight"], r["allocation"]
+        ))
+    print("--------------------------------------------------------------------------")
+    print(f"Sum of weights (top-{result['k']}): {result['sum_weights']:.6f}")
+    print(f"Total allocation       : ${result['sum_allocation']:.2f}")
+    print("Note: weights are normalized over the top-k set (top-k softmax).")

@@ -5,3 +5,4 @@ pandas>=2.2
 numpy>=1.26
 requests>=2.31
 python-dateutil>=2.8.2
+plotly>=5.18.0

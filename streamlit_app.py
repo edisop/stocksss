@@ -2,8 +2,8 @@
 # Streamlit Cloud UI for your Modal-based "investment plans".
 # - On startup: ensure there's a plan for today (>= 9am Australia/Melbourne). If none, create once.
 # - Every run: show a dropdown of all plans (oldest -> latest), default to latest.
-# - For the selected plan: Allows adjusting K, Amount, and Temp to simulate different allocations.
-# - Bottom section: Historical timeline with Date Filter, Aggregate Stats, and Detailed Holdings with Highlighting.
+# - For the selected plan: Allows adjusting K, Amount, Temp, AND Strategy (Softmax vs Uniform).
+# - Bottom section: Historical timeline with Date Filter, Aggregate Stats, and Detailed Holdings.
 #
 # Required secrets in Streamlit Cloud (Settings → Secrets):
 #   MODAL_TOKEN_ID=...
@@ -200,27 +200,36 @@ def create_plan_now() -> Dict[str, Any]:
     saved   = save_plan_fn.remote(result)
     return saved
 
-def recalculate_metrics(df_rows: pd.DataFrame, top_k: int, temp: float, invest_amt: float):
+def recalculate_metrics(df_rows: pd.DataFrame, top_k: int, temp: float, invest_amt: float, strategy: str = "Softmax"):
     """
     Recalculates weights, allocations, and shares based on simulation parameters.
     Assumes df_rows has 'score' (raw logits) and 'buy_price'.
+    strategy: "Softmax" (uses temp) or "Uniform" (1/k).
     """
     # 1. Sort by score descending and take Top K
     df_sim = df_rows.sort_values(by="score", ascending=False).head(top_k).copy()
+    actual_k = len(df_sim)
     
-    # 2. Compute Softmax with new Temp
-    # Softmax formula: exp(x/T) / sum(exp(x/T))
-    # Stability fix: subtract max
-    scores = df_sim["score"].values.astype(float)
-    if temp <= 0: temp = 0.01 # prevent div by zero
-    
-    scaled_scores = scores / temp
-    max_s = np.max(scaled_scores)
-    exps = np.exp(scaled_scores - max_s)
-    sum_exps = np.sum(exps)
-    weights = exps / sum_exps
-    
-    df_sim["weight"] = weights
+    if strategy == "Uniform":
+        # Equal weight = 1 / K
+        if actual_k > 0:
+            weight = 1.0 / actual_k
+        else:
+            weight = 0.0
+        df_sim["weight"] = weight
+        
+    else:
+        # Softmax formula: exp(x/T) / sum(exp(x/T))
+        scores = df_sim["score"].values.astype(float)
+        if temp <= 0: temp = 0.01 
+        
+        scaled_scores = scores / temp
+        max_s = np.max(scaled_scores) if actual_k > 0 else 0
+        exps = np.exp(scaled_scores - max_s)
+        sum_exps = np.sum(exps)
+        weights = exps / sum_exps if sum_exps > 0 else 0
+        
+        df_sim["weight"] = weights
     
     # 3. Allocation and Shares
     df_sim["allocation"] = df_sim["weight"] * invest_amt
@@ -304,6 +313,15 @@ orig_temp = float(sel_plan.get("temp", 1.0))
 # ADJUSTABLE INPUTS
 # -------------------
 with st.expander("🛠️ Adjustment / Simulation Parameters", expanded=True):
+    # Strategy Mode
+    sim_strategy = st.radio(
+        "Allocation Strategy", 
+        ["Softmax", "Uniform"], 
+        index=0, 
+        horizontal=True,
+        help="Softmax uses score & temperature to weight stocks. Uniform gives equal money to all Top K stocks."
+    )
+    
     col_adj1, col_adj2, col_adj3 = st.columns(3)
     
     # Limit slider max to available rows in the data blob
@@ -312,9 +330,13 @@ with st.expander("🛠️ Adjustment / Simulation Parameters", expanded=True):
     
     sim_k = col_adj1.slider("Top K (Subset)", min_value=1, max_value=max_available_rows, value=min(orig_k, max_available_rows))
     sim_amt = col_adj2.number_input("Investment Amount ($)", min_value=100.0, value=orig_amt, step=100.0)
-    sim_temp = col_adj3.slider("Softmax Temperature", min_value=0.1, max_value=5.0, value=orig_temp, step=0.1)
     
-    st.caption(f"Original Plan Settings: K={orig_k}, Amt=${orig_amt}, Temp={orig_temp}")
+    # Only show Temp slider if Softmax is chosen
+    if sim_strategy == "Softmax":
+        sim_temp = col_adj3.slider("Softmax Temperature", min_value=0.1, max_value=5.0, value=orig_temp, step=0.1)
+    else:
+        sim_temp = 1.0 # Default dummy value, unused in Uniform
+        col_adj3.markdown("*(Temp ignored in Uniform mode)*")
 
 # -------------------
 # RECALCULATE LOGIC
@@ -325,7 +347,7 @@ if df_raw.empty:
     st.stop()
 
 # Perform simulation/recalculation locally
-df_sim = recalculate_metrics(df_raw, sim_k, sim_temp, sim_amt)
+df_sim = recalculate_metrics(df_raw, sim_k, sim_temp, sim_amt, strategy=sim_strategy)
 
 # Fetch Live Prices
 sim_tickers = df_sim["ticker"].dropna().unique().tolist()
@@ -348,7 +370,7 @@ totals["pnl_pct"] = (totals["current_value"] / totals["buy_value"] - 1.0) * 100.
 # -------------------
 # DISPLAY TABLES
 # -------------------
-st.markdown("### Portfolio Performance (Based on Settings)")
+st.markdown(f"### Portfolio Performance ({sim_strategy} Mode)")
 
 kpi = st.columns(3)
 def fmt_money(x): return f"${x:,.2f}"
@@ -359,8 +381,8 @@ kpi[1].metric("Current Value", fmt_money(totals["current_value"]))
 kpi[2].metric("P/L", fmt_money(totals["pnl_abs"]), fmt_pct(totals["pnl_pct"]))
 
 view_cols = ["rank","ticker","score","weight","allocation","buy_price","shares","current_price","current_value","pnl_abs","pnl_pct"]
-# Re-rank based on the sliced view
-df_sim = df_sim.sort_values("weight", ascending=False).reset_index(drop=True)
+# Re-rank based on the sliced view (sorting by weight still works for uniform, rank matches index)
+df_sim = df_sim.sort_values(["weight", "score"], ascending=[False, False]).reset_index(drop=True)
 df_sim["rank"] = df_sim.index + 1
 
 df_view = df_sim.loc[:, [c for c in view_cols if c in df_sim.columns]].copy()
@@ -419,6 +441,7 @@ else:
 active_plans = [p for p in final_plans if datetime.strptime(p["date"], "%Y-%m-%d").date() >= start_date]
 
 st.caption(f"Simulating investment from **{start_date}** to **{max_date}** ({len(active_plans)} trading days).")
+st.caption(f"Using Strategy: **{sim_strategy}**, K={sim_k}, Amt=${sim_amt}.")
 
 if st.button("Generate Historical Timeline & Holdings"):
     with st.spinner("Processing plans, calculating holdings, and fetching market data..."):
@@ -439,8 +462,8 @@ if st.button("Generate Historical Timeline & Holdings"):
             if not blob: continue
             raw = pd.DataFrame(blob.get("rows", []))
             if raw.empty: continue
-            # Must run sim logic to get top K
-            sim = recalculate_metrics(raw, sim_k, sim_temp, sim_amt)
+            # Must run sim logic to get top K with selected Strategy
+            sim = recalculate_metrics(raw, sim_k, sim_temp, sim_amt, strategy=sim_strategy)
             top_tickers = set(sim["ticker"].tolist())
             
             recent_universe.update(top_tickers)
@@ -472,8 +495,8 @@ if st.button("Generate Historical Timeline & Holdings"):
             d_rows["buy_price"] = pd.to_numeric(d_rows["buy_price"], errors="coerce").fillna(0)
             d_rows["score"]     = pd.to_numeric(d_rows["score"], errors="coerce")
 
-            # Apply Simulation Settings
-            d_sim = recalculate_metrics(d_rows, sim_k, sim_temp, sim_amt)
+            # Apply Simulation Settings (With Strategy)
+            d_sim = recalculate_metrics(d_rows, sim_k, sim_temp, sim_amt, strategy=sim_strategy)
             
             plan_tickers = d_sim["ticker"].unique().tolist()
             all_tickers_involved.update(plan_tickers)
@@ -551,7 +574,7 @@ if st.button("Generate Historical Timeline & Holdings"):
                 mode='lines+markers', line=dict(color='royalblue', width=2), marker=dict(size=6)
             ))
             fig.update_layout(
-                title=f"Daily Plan Performance ({start_date} to {max_date})",
+                title=f"Daily Plan Performance ({start_date} to {max_date}) - {sim_strategy} Mode",
                 xaxis_title="Date", yaxis_title="Return (%)", hovermode="x unified",
                 xaxis=dict(tickformat="%b %d", dtick="D1")
             )
@@ -574,10 +597,10 @@ if st.button("Generate Historical Timeline & Holdings"):
         st.divider()
         st.subheader("📦 Detailed Portfolio Holdings")
         st.caption("Aggregated holdings from the selected start date. Logic for highlighting:")
-        st.markdown("""
-        - <span style='background-color: #ffcccc; padding: 2px 4px; border-radius: 4px; color: black;'>Red</span>: Stock is **NOT** in the Top K of the last 3 available plans.
-        - <span style='background-color: #fff9c4; padding: 2px 4px; border-radius: 4px; color: black;'>Yellow</span>: Stock is **NOT** in the Top K of the *latest* plan (but is in the last 3).
-        - **White**: Stock is currently in the Top K of the latest plan.
+        st.markdown(f"""
+        - <span style='background-color: #ffcccc; padding: 2px 4px; border-radius: 4px; color: black;'>Red</span>: Stock is **NOT** in the Top {sim_k} of the last 3 available plans.
+        - <span style='background-color: #fff9c4; padding: 2px 4px; border-radius: 4px; color: black;'>Yellow</span>: Stock is **NOT** in the Top {sim_k} of the *latest* plan (but is in the last 3).
+        - **White**: Stock is currently in the Top {sim_k} of the latest plan.
         """, unsafe_allow_html=True)
         
         if portfolio_holdings:

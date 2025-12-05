@@ -160,10 +160,14 @@ def _live_prices(tickers: List[str]) -> Dict[str, float]:
 
 @st.cache_data(ttl=300)
 def _get_spy_history():
-    """Fetches 1 year of SPY history to use for benchmarking."""
+    """Fetches SPY history to use for benchmarking."""
     try:
         spy = yf.Ticker("SPY")
-        hist = spy.history(period="2y", interval="1d")
+        # Fetch 5y to be safe
+        hist = spy.history(period="5y", interval="1d")
+        # IMPORTANT: Remove timezone info to match naive dates from plans
+        if not hist.empty:
+            hist.index = hist.index.tz_localize(None)
         return hist["Close"]
     except:
         return pd.Series(dtype=float)
@@ -447,8 +451,11 @@ if st.button("Generate Historical Timeline Analysis"):
         # 2. Fetch Live Prices for ALL unique tickers found across all history
         live_prices_all = _live_prices(list(all_plan_tickers))
         
-        # 3. Compute Returns
+        # 3. Compute Returns & Aggregate Stats
         plot_points = []
+        
+        agg_invested = 0.0
+        agg_current_val = 0.0
         
         for item in history_data:
             df_h = item["df"]
@@ -456,6 +463,10 @@ if st.button("Generate Historical Timeline Analysis"):
             df_h["curr_p"] = df_h["ticker"].map(live_prices_all).astype(float)
             curr_val = np.nansum(df_h["shares"] * df_h["curr_p"])
             orig_val = np.nansum(item["invested"])
+            
+            # Accumulate totals
+            agg_invested += orig_val
+            agg_current_val += curr_val
             
             if orig_val > 0:
                 model_ret_pct = (curr_val / orig_val - 1.0) * 100.0
@@ -466,11 +477,14 @@ if st.button("Generate Historical Timeline Analysis"):
             spy_ret_pct = 0.0
             try:
                 p_dt = pd.to_datetime(item["date"])
+                # FIX: Ensure spy_hist index is naive (done in _get_spy_history)
+                # Use asof to find closest prior/exact date to avoid issues on weekends
                 idx_loc = spy_hist.index.get_indexer([p_dt], method='nearest')[0]
                 if idx_loc >= 0:
                     spy_start_price = spy_hist.iloc[idx_loc]
                     spy_ret_pct = (current_spy / spy_start_price - 1.0) * 100.0
             except Exception as e:
+                # Keep 0.0 if failed
                 pass
                 
             plot_points.append({
@@ -494,7 +508,7 @@ if st.button("Generate Historical Timeline Analysis"):
                 marker_color='indianred',
                 hovertemplate="%{text}<br>Model Return: %{y:.2f}%",
                 text=df_plot["Details"],
-                textposition='none' # Hide text on bars to prevent squashing
+                textposition='none' 
             ))
             
             # Line/Scatter for SPY
@@ -515,12 +529,25 @@ if st.button("Generate Historical Timeline Analysis"):
                 legend_title="Legend",
                 hovermode="x unified",
                 xaxis=dict(
-                    tickformat="%b %d", # Concise date format (e.g. "Oct 12")
-                    dtick="D1"          # Attempt to tick every day, plotly auto-hides if too crowded
+                    tickformat="%b %d",
+                    dtick="D1"
                 )
             )
             
             st.plotly_chart(fig, use_container_width=True)
+            
+            # 5. Aggregate Summary Statistics
+            st.markdown("### Aggregate Strategy Performance")
+            st.caption(f"If you had invested **${sim_amt:,.0f}** every day a plan was created (using the latest plan per day):")
+            
+            agg_cols = st.columns(3)
+            
+            agg_pnl = agg_current_val - agg_invested
+            agg_pct = (agg_pnl / agg_invested * 100.0) if agg_invested > 0 else 0.0
+            
+            agg_cols[0].metric("Total Capital Invested", fmt_money(agg_invested))
+            agg_cols[1].metric("Total Current Value", fmt_money(agg_current_val))
+            agg_cols[2].metric("Total Net Profit", fmt_money(agg_pnl), fmt_pct(agg_pct))
             
         else:
             st.warning("No data points generated.")

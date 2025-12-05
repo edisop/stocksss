@@ -3,7 +3,7 @@
 # - On startup: ensure there's a plan for today (>= 9am Australia/Melbourne). If none, create once.
 # - Every run: show a dropdown of all plans (oldest -> latest), default to latest.
 # - For the selected plan: Allows adjusting K, Amount, and Temp to simulate different allocations.
-# - Bottom section: Historical timeline of all plans vs S&P 500.
+# - Bottom section: Historical timeline of all plans vs S&P 500 using ADJUSTED settings.
 #
 # Required secrets in Streamlit Cloud (Settings → Secrets):
 #   MODAL_TOKEN_ID=...
@@ -130,11 +130,8 @@ def _live_prices(tickers: List[str]) -> Dict[str, float]:
         return prices
     
     # Chunking to avoid massive URL strings if list is huge
-    chunk_size = 50
     all_tickers = list(set(tickers))
     
-    # 1. Try batch download for current price proxy (Close of last minute/day)
-    # yfinance download is often faster than iterating Ticker.fast_info for many symbols
     try:
         # We fetch 5d to be safe over weekends/holidays
         df = yf.download(all_tickers, period="5d", interval="1d", progress=False, group_by="ticker", threads=True)
@@ -142,7 +139,6 @@ def _live_prices(tickers: List[str]) -> Dict[str, float]:
         if len(all_tickers) == 1:
             t = all_tickers[0]
             try:
-                # If single ticker, columns are just Open, High, etc.
                 if not df.empty:
                     prices[t] = float(df["Close"].dropna().iloc[-1])
             except:
@@ -306,18 +302,12 @@ orig_temp = float(sel_plan.get("temp", 1.0))
 with st.expander("🛠️ Adjustment / Simulation Parameters", expanded=True):
     col_adj1, col_adj2, col_adj3 = st.columns(3)
     
-    # We can't increase K beyond what was originally stored/calculated if the stored rows are limited.
-    # However, usually the plan stores TOP_K rows. If the user wants to reduce K, we can.
-    # If the user wants to increase K, we can only do so if the stored plan has more candidates rows.
-    # We will assume 'rows' contains at least the original K.
+    # Limit slider max to available rows in the data blob
     raw_rows = sel_plan.get("rows", [])
     max_available_rows = len(raw_rows)
     
-    # Limit slider max to available rows in the data blob
     sim_k = col_adj1.slider("Top K (Subset)", min_value=1, max_value=max_available_rows, value=min(orig_k, max_available_rows))
-    
     sim_amt = col_adj2.number_input("Investment Amount ($)", min_value=100.0, value=orig_amt, step=100.0)
-    
     sim_temp = col_adj3.slider("Softmax Temperature", min_value=0.1, max_value=5.0, value=orig_temp, step=0.1)
     
     st.caption(f"Original Plan Settings: K={orig_k}, Amt=${orig_amt}, Temp={orig_temp}")
@@ -391,29 +381,17 @@ st.divider()
 # HISTORICAL TIMELINE & BENCHMARK
 # -------------------------------------------------------------------------
 st.header("📅 Historical Performance vs S&P 500")
-
-# Logic:
-# 1. Iterate all plans.
-# 2. For each plan, calculate the return % from 'date' to NOW.
-# 3. For each plan 'date', find S&P500 price. Calculate return % from that date to NOW.
-# 4. Plot both on a timeline.
+st.caption("Calculated using the **adjusted** Top-K, Amount, and Temp settings from above.")
 
 if st.button("Generate Historical Timeline Analysis"):
-    with st.spinner("Processing all historical plans and fetching market data..."):
+    with st.spinner("Processing all historical plans with current simulation settings..."):
         
         # 1. Gather all plan data
-        # We need to fetch details for ALL plans. This might be slow if there are hundreds.
-        # Ideally, we'd parallelize or store summaries. For now, we loop.
-        
         history_data = []
         all_plan_tickers = set()
 
         # Sort plans by date
         sorted_plans = sorted(plans, key=lambda x: x.get("created_at_utc", ""))
-        
-        # We need the full blobs to get tickers/shares. 
-        # To avoid making N remote calls sequentially which is slow, we will do it but inform user.
-        # (Optimisation: batch_get if available, or just endure it for now)
         
         # Pre-fetch SPY history
         spy_hist = _get_spy_history() # Series with DatetimeIndex
@@ -434,18 +412,23 @@ if st.button("Generate Historical Timeline Analysis"):
             if not rows: continue
             
             d_rows = pd.DataFrame(rows)
-            d_rows["shares"] = pd.to_numeric(d_rows["shares"], errors="coerce").fillna(0)
+            # Ensure necessary columns are numeric
             d_rows["buy_price"] = pd.to_numeric(d_rows["buy_price"], errors="coerce").fillna(0)
+            d_rows["score"]     = pd.to_numeric(d_rows["score"], errors="coerce")
+
+            # CRITICAL FIX: Recalculate metrics for history using current sliders
+            # Instead of using stored "shares" and "allocation", we re-run logic.
+            d_sim = recalculate_metrics(d_rows, sim_k, sim_temp, sim_amt)
             
-            # Identify tickers needed for this plan
-            plan_tickers = d_rows["ticker"].unique().tolist()
+            # Identify tickers needed for this plan (only the top K selected)
+            plan_tickers = d_sim["ticker"].unique().tolist()
             all_plan_tickers.update(plan_tickers)
             
             history_data.append({
                 "date": p_date_str,
                 "created_at": p_meta.get("created_at_melbourne"),
-                "df": d_rows,
-                "invested": d_rows["shares"] * d_rows["buy_price"]
+                "df": d_sim,
+                "invested": d_sim["shares"] * d_sim["buy_price"]
             })
             
             prog_bar.progress((i + 1) / len(sorted_plans))
@@ -469,14 +452,9 @@ if st.button("Generate Historical Timeline Analysis"):
                 model_ret_pct = 0.0
                 
             # Benchmark Return
-            # Find SPY close on plan date
             spy_ret_pct = 0.0
             try:
-                # plan date string to datetime
                 p_dt = pd.to_datetime(item["date"])
-                # localize to match spy_hist index if needed, or naive match
-                # Spy hist index is typically tz-aware (America/New_York) or naive depending on yfinance version
-                # Let's try to find nearest date
                 idx_loc = spy_hist.index.get_indexer([p_dt], method='nearest')[0]
                 if idx_loc >= 0:
                     spy_start_price = spy_hist.iloc[idx_loc]
@@ -503,8 +481,9 @@ if st.button("Generate Historical Timeline Analysis"):
                 y=df_plot["Model Return"],
                 name="Model Plan Return",
                 marker_color='indianred',
-                hovertemplate="%{text}<br>Return: %{y:.2f}%",
-                text=df_plot["Details"]
+                hovertemplate="%{text}<br>Model Return: %{y:.2f}%",
+                text=df_plot["Details"],
+                textposition='none' # Hide text on bars to prevent squashing
             ))
             
             # Line/Scatter for SPY
@@ -513,34 +492,32 @@ if st.button("Generate Historical Timeline Analysis"):
                 y=df_plot["S&P 500 Return"],
                 name="S&P 500 (Benchmark)",
                 mode='lines+markers',
-                line=dict(color='royalblue', width=3),
-                marker=dict(size=8)
+                line=dict(color='royalblue', width=2),
+                marker=dict(size=6),
+                hovertemplate="SPY Return: %{y:.2f}%"
             ))
             
             fig.update_layout(
-                title="Performance of Each Plan vs S&P 500 (if held to Today)",
+                title="Performance of Each Plan (Adjusted) vs S&P 500",
                 xaxis_title="Plan Creation Date",
                 yaxis_title="Total Return (%)",
                 legend_title="Legend",
-                hovermode="x unified"
+                hovermode="x unified",
+                xaxis=dict(
+                    tickformat="%b %d", # Concise date format (e.g. "Oct 12")
+                    dtick="D1"          # Attempt to tick every day, plotly auto-hides if too crowded
+                )
             )
             
             st.plotly_chart(fig, use_container_width=True)
             
-            st.markdown("""
-            **How to read this chart:**
-            - **X-Axis:** The date the plan was generated.
-            - **Y-Axis:** The percentage return if you bought that plan on that day and held it until **now**.
-            - **Red Bar:** Your Model's performance.
-            - **Blue Line:** S&P 500 performance over the same specific period.
-            """)
         else:
             st.warning("No data points generated.")
 
 st.markdown("#### Notes")
 st.markdown("""
-- A new plan is created **once per day** at ~9:00 in Australia/Melbourne time (if none exists for today).
-- When a plan is created, **buy prices** are snapshot on Modal.
-- "Adjustment" simulates how the plan *would have looked* with different settings (K, Temp, Amount) using the original raw model scores.
+- A new plan is created **once per day** at ~9:00 in Australia/Melbourne time.
+- **Buy prices** are snapshot on Modal when the plan was first created.
+- **Top K, Temp, and Amount** used in the timeline above are the ones **currently selected** in the Simulation panel, applied retrospectively.
 - Not financial advice.
 """)

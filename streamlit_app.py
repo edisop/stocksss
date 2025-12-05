@@ -3,7 +3,7 @@
 # - On startup: ensure there's a plan for today (>= 9am Australia/Melbourne). If none, create once.
 # - Every run: show a dropdown of all plans (oldest -> latest), default to latest.
 # - For the selected plan: Allows adjusting K, Amount, and Temp to simulate different allocations.
-# - Bottom section: Historical timeline of all plans vs S&P 500 using ADJUSTED settings.
+# - Bottom section: Historical timeline with Date Filter, Aggregate Stats, and Detailed Holdings with Highlighting.
 #
 # Required secrets in Streamlit Cloud (Settings → Secrets):
 #   MODAL_TOKEN_ID=...
@@ -25,7 +25,7 @@
 from __future__ import annotations
 import os, math, time
 from datetime import datetime, date, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Set
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -385,41 +385,83 @@ st.divider()
 # HISTORICAL TIMELINE & BENCHMARK
 # -------------------------------------------------------------------------
 st.header("📅 Historical Performance vs S&P 500")
-st.caption("Calculated using the **adjusted** Top-K, Amount, and Temp settings from above. If multiple plans exist for one day (e.g., from testing), only the **latest** one is used.")
 
-if st.button("Generate Historical Timeline Analysis"):
-    with st.spinner("Processing all historical plans with current simulation settings..."):
+# 0. Preparation & Deduplication
+sorted_plans = sorted(plans, key=lambda x: x.get("created_at_utc", ""))
+deduped_map = {}
+for p in sorted_plans:
+    d_str = p.get("date")
+    if d_str:
+        deduped_map[d_str] = p
+# Final plans sorted by date
+final_plans = sorted(deduped_map.values(), key=lambda x: x.get("date", ""))
+
+if not final_plans:
+    st.stop()
+
+# 1. Date Range Slider
+min_date = datetime.strptime(final_plans[0]["date"], "%Y-%m-%d").date()
+max_date = datetime.strptime(final_plans[-1]["date"], "%Y-%m-%d").date()
+
+# If only one date, slider crashes, so check
+if min_date == max_date:
+    start_date = min_date
+else:
+    start_date = st.slider(
+        "Select Simulation Start Date:",
+        min_value=min_date,
+        max_value=max_date,
+        value=min_date,
+        format="YYYY-MM-DD"
+    )
+
+# Filter plans based on slider
+active_plans = [p for p in final_plans if datetime.strptime(p["date"], "%Y-%m-%d").date() >= start_date]
+
+st.caption(f"Simulating investment from **{start_date}** to **{max_date}** ({len(active_plans)} trading days).")
+
+if st.button("Generate Historical Timeline & Holdings"):
+    with st.spinner("Processing plans, calculating holdings, and fetching market data..."):
         
-        # 1. Gather all plan data
+        # --- A. PRE-CALCULATE 'ACTIVE' UNIVERSES FOR HIGHLIGHTING ---
+        # "Latest" = the absolute last plan in the system
+        # "Recent 3" = the last 3 plans in the system
+        # We need to run recalculate_metrics on them to know which stocks made the cut under current settings.
+        
+        latest_universe: Set[str] = set()
+        recent_universe: Set[str] = set()
+        
+        # Get last 3 plans from the FULL list (not just active)
+        subset_for_highlights = final_plans[-3:] if len(final_plans) >= 3 else final_plans
+        
+        for idx, p_meta in enumerate(subset_for_highlights):
+            blob = get_plan_fn.remote(p_meta["plan_id"])
+            if not blob: continue
+            raw = pd.DataFrame(blob.get("rows", []))
+            if raw.empty: continue
+            # Must run sim logic to get top K
+            sim = recalculate_metrics(raw, sim_k, sim_temp, sim_amt)
+            top_tickers = set(sim["ticker"].tolist())
+            
+            recent_universe.update(top_tickers)
+            if idx == len(subset_for_highlights) - 1:
+                latest_universe = top_tickers
+
+        # --- B. PROCESS ACTIVE PLANS FOR TIMELINE & HOLDINGS ---
+        
         history_data = []
-        all_plan_tickers = set()
+        all_tickers_involved = set()
+        
+        # Accumulator for holdings: {ticker: {'shares': 0.0, 'invested': 0.0}}
+        portfolio_holdings = {}
 
-        # Sort plans by date
-        sorted_plans = sorted(plans, key=lambda x: x.get("created_at_utc", ""))
-        
-        # DEDUPLICATION LOGIC: Keep only the latest plan for each 'date' string
-        deduped_map = {}
-        for p in sorted_plans:
-            d_str = p.get("date")
-            if d_str:
-                deduped_map[d_str] = p
-        
-        # Convert back to sorted list based on date string
-        # Assuming YYYY-MM-DD format, sorting strings sorts dates correctly
-        final_plans = sorted(deduped_map.values(), key=lambda x: x.get("date", ""))
-        
-        # Pre-fetch SPY history
-        spy_hist = _get_spy_history() # Series with DatetimeIndex
+        spy_hist = _get_spy_history()
         current_spy = spy_hist.iloc[-1] if not spy_hist.empty else 0.0
 
-        # Create a progress bar
         prog_bar = st.progress(0)
         
-        for i, p_meta in enumerate(final_plans):
+        for i, p_meta in enumerate(active_plans):
             pid = p_meta["plan_id"]
-            p_date_str = p_meta.get("date")
-            
-            # Fetch full plan
             blob = get_plan_fn.remote(pid)
             if not blob: continue
             
@@ -427,67 +469,63 @@ if st.button("Generate Historical Timeline Analysis"):
             if not rows: continue
             
             d_rows = pd.DataFrame(rows)
-            # Ensure necessary columns are numeric
             d_rows["buy_price"] = pd.to_numeric(d_rows["buy_price"], errors="coerce").fillna(0)
             d_rows["score"]     = pd.to_numeric(d_rows["score"], errors="coerce")
 
-            # CRITICAL FIX: Recalculate metrics for history using current sliders
-            # Instead of using stored "shares" and "allocation", we re-run logic.
+            # Apply Simulation Settings
             d_sim = recalculate_metrics(d_rows, sim_k, sim_temp, sim_amt)
             
-            # Identify tickers needed for this plan (only the top K selected)
             plan_tickers = d_sim["ticker"].unique().tolist()
-            all_plan_tickers.update(plan_tickers)
+            all_tickers_involved.update(plan_tickers)
             
+            # Update Portfolio Holdings
+            for row in d_sim.itertuples():
+                if row.shares > 0:
+                    if row.ticker not in portfolio_holdings:
+                        portfolio_holdings[row.ticker] = {'shares': 0.0, 'invested': 0.0}
+                    portfolio_holdings[row.ticker]['shares'] += row.shares
+                    portfolio_holdings[row.ticker]['invested'] += (row.shares * row.buy_price)
+
             history_data.append({
-                "date": p_date_str,
-                "created_at": p_meta.get("created_at_melbourne"),
+                "date": p_meta.get("date"),
                 "df": d_sim,
                 "invested": d_sim["shares"] * d_sim["buy_price"]
             })
             
-            prog_bar.progress((i + 1) / len(final_plans))
+            prog_bar.progress((i + 1) / len(active_plans))
 
-        # 2. Fetch Live Prices for ALL unique tickers found across all history
-        live_prices_all = _live_prices(list(all_plan_tickers))
+        # --- C. FETCH LIVE PRICES ---
+        all_tickers_involved.update(portfolio_holdings.keys())
+        live_prices_all = _live_prices(list(all_tickers_involved))
         
-        # 3. Compute Returns & Aggregate Stats
+        # --- D. TIMELINE PLOT DATA ---
         plot_points = []
-        
         agg_invested = 0.0
         agg_model_val = 0.0
         agg_spy_val = 0.0
         
         for item in history_data:
             df_h = item["df"]
-            # Current value using live prices
             df_h["curr_p"] = df_h["ticker"].map(live_prices_all).astype(float)
             curr_val = np.nansum(df_h["shares"] * df_h["curr_p"])
             orig_val = np.nansum(item["invested"])
             
-            # Accumulate Model totals
             agg_invested += orig_val
             agg_model_val += curr_val
             
-            if orig_val > 0:
-                model_ret_pct = (curr_val / orig_val - 1.0) * 100.0
-            else:
-                model_ret_pct = 0.0
-                
-            # Benchmark Return & Value Accumulation
-            spy_ret_pct = 0.0
-            spy_val_now = orig_val # default if no data (no gain/loss)
+            model_ret_pct = (curr_val / orig_val - 1.0) * 100.0 if orig_val > 0 else 0.0
             
+            # Benchmark
+            spy_ret_pct = 0.0
+            spy_val_now = orig_val
             try:
                 p_dt = pd.to_datetime(item["date"])
-                # Use asof to find closest prior/exact date to avoid issues on weekends
                 idx_loc = spy_hist.index.get_indexer([p_dt], method='nearest')[0]
                 if idx_loc >= 0:
                     spy_start_price = spy_hist.iloc[idx_loc]
                     spy_ret_pct = (current_spy / spy_start_price - 1.0) * 100.0
-                    # For fair comparison: What if we put 'orig_val' into SPY instead?
                     spy_val_now = orig_val * (current_spy / spy_start_price)
-            except Exception as e:
+            except:
                 pass
             
             agg_spy_val += spy_val_now
@@ -499,74 +537,108 @@ if st.button("Generate Historical Timeline Analysis"):
                 "Details": f"Date: {item['date']}<br>Invested: ${orig_val:,.0f}<br>Current: ${curr_val:,.0f}"
             })
             
-        # 4. Plot
+        # --- E. PLOTTING ---
         if plot_points:
             df_plot = pd.DataFrame(plot_points)
-            
             fig = go.Figure()
-            
-            # Bar chart for Model
             fig.add_trace(go.Bar(
-                x=df_plot["date"],
-                y=df_plot["Model Return"],
-                name="Model Plan Return",
-                marker_color='indianred',
-                hovertemplate="%{text}<br>Model Return: %{y:.2f}%",
-                text=df_plot["Details"],
-                textposition='none' 
+                x=df_plot["date"], y=df_plot["Model Return"], name="Model Plan Return",
+                marker_color='indianred', hovertemplate="%{text}<br>Model: %{y:.2f}%",
+                text=df_plot["Details"], textposition='none'
             ))
-            
-            # Line/Scatter for SPY
             fig.add_trace(go.Scatter(
-                x=df_plot["date"],
-                y=df_plot["S&P 500 Return"],
-                name="S&P 500 (Benchmark)",
-                mode='lines+markers',
-                line=dict(color='royalblue', width=2),
-                marker=dict(size=6),
-                hovertemplate="SPY Return: %{y:.2f}%"
+                x=df_plot["date"], y=df_plot["S&P 500 Return"], name="S&P 500",
+                mode='lines+markers', line=dict(color='royalblue', width=2), marker=dict(size=6)
             ))
-            
             fig.update_layout(
-                title="Performance of Each Plan (Adjusted) vs S&P 500",
-                xaxis_title="Plan Creation Date",
-                yaxis_title="Total Return (%)",
-                legend_title="Legend",
-                hovermode="x unified",
-                xaxis=dict(
-                    tickformat="%b %d",
-                    dtick="D1"
-                )
+                title=f"Daily Plan Performance ({start_date} to {max_date})",
+                xaxis_title="Date", yaxis_title="Return (%)", hovermode="x unified",
+                xaxis=dict(tickformat="%b %d", dtick="D1")
             )
-            
             st.plotly_chart(fig, use_container_width=True)
             
-            # 5. Aggregate Summary Statistics
+            # --- F. AGGREGATE STATS ---
             st.markdown("### Aggregate Strategy Performance")
-            st.caption(f"If you had invested **${sim_amt:,.0f}** every day a plan was created (using the latest plan per day):")
-            
             agg_cols = st.columns(4)
-            
-            # Model Stats
             model_pnl = agg_model_val - agg_invested
             model_pct = (model_pnl / agg_invested * 100.0) if agg_invested > 0 else 0.0
-            
-            # SPY Stats
             spy_pnl = agg_spy_val - agg_invested
             spy_pct = (spy_pnl / agg_invested * 100.0) if agg_invested > 0 else 0.0
             
-            agg_cols[0].metric("Total Invested", fmt_money(agg_invested))
+            agg_cols[0].metric("Total Capital Invested", fmt_money(agg_invested))
             agg_cols[1].metric("Current Value (Model)", fmt_money(agg_model_val))
             agg_cols[2].metric("Total Profit (Model)", fmt_money(model_pnl), fmt_pct(model_pct))
-            agg_cols[3].metric("Total Profit (S&P 500)", fmt_money(spy_pnl), fmt_pct(spy_pct), delta_color="normal")
+            agg_cols[3].metric("Total Profit (S&P 500)", fmt_money(spy_pnl), fmt_pct(spy_pct))
+
+        # --- G. DETAILED HOLDINGS TABLE ---
+        st.divider()
+        st.subheader("📦 Detailed Portfolio Holdings")
+        st.caption("Aggregated holdings from the selected start date. Logic for highlighting:")
+        st.markdown("""
+        - <span style='background-color: #ffcccc; padding: 2px 4px; border-radius: 4px; color: black;'>Red</span>: Stock is **NOT** in the Top K of the last 3 available plans.
+        - <span style='background-color: #fff9c4; padding: 2px 4px; border-radius: 4px; color: black;'>Yellow</span>: Stock is **NOT** in the Top K of the *latest* plan (but is in the last 3).
+        - **White**: Stock is currently in the Top K of the latest plan.
+        """, unsafe_allow_html=True)
+        
+        if portfolio_holdings:
+            holdings_list = []
+            for t, data in portfolio_holdings.items():
+                curr_p = live_prices_all.get(t, 0.0)
+                shares = data['shares']
+                invested = data['invested']
+                curr_val = shares * curr_p
+                pnl = curr_val - invested
+                pnl_pct = (pnl / invested * 100.0) if invested > 0 else 0.0
+                
+                # Determine Status for Coloring
+                if t not in recent_universe:
+                    status = "Sell/Drop (Red)"
+                elif t not in latest_universe:
+                    status = "Warning (Yellow)"
+                else:
+                    status = "Active (Green)"
+                
+                holdings_list.append({
+                    "Ticker": t,
+                    "Total Shares": shares,
+                    "Total Invested": invested,
+                    "Current Price": curr_p,
+                    "Current Value": curr_val,
+                    "P&L ($)": pnl,
+                    "P&L (%)": pnl_pct,
+                    "Status": status
+                })
             
+            df_holdings = pd.DataFrame(holdings_list)
+            
+            # Styling function
+            def highlight_status(row):
+                s = row["Status"]
+                if s == "Sell/Drop (Red)":
+                    return ['background-color: #ffcccc; color: black'] * len(row)
+                elif s == "Warning (Yellow)":
+                    return ['background-color: #fff9c4; color: black'] * len(row)
+                else:
+                    return [''] * len(row)
+
+            # Apply formatting
+            df_styled = df_holdings.style.apply(highlight_status, axis=1).format({
+                "Total Shares": "{:.4f}",
+                "Total Invested": "${:,.2f}",
+                "Current Price": "${:,.2f}",
+                "Current Value": "${:,.2f}",
+                "P&L ($)": "${:,.2f}",
+                "P&L (%)": "{:.2f}%"
+            })
+            
+            st.dataframe(df_styled, use_container_width=True, hide_index=True)
         else:
-            st.warning("No data points generated.")
+            st.info("No holdings found for this period.")
 
 st.markdown("#### Notes")
 st.markdown("""
 - A new plan is created **once per day** at ~9:00 in Australia/Melbourne time.
-- **Buy prices** are snapshot on Modal when the plan was first created.
-- **Top K, Temp, and Amount** used in the timeline above are the ones **currently selected** in the Simulation panel, applied retrospectively.
+- **Top K, Temp, and Amount** are simulation parameters applied to historical raw scores.
+- **Red/Yellow highlights** indicate momentum shifts based on the Top K set of the last 3 available plans.
 - Not financial advice.
 """)

@@ -455,7 +455,8 @@ if st.button("Generate Historical Timeline Analysis"):
         plot_points = []
         
         agg_invested = 0.0
-        agg_current_val = 0.0
+        agg_model_val = 0.0
+        agg_spy_val = 0.0
         
         for item in history_data:
             df_h = item["df"]
@@ -464,29 +465,33 @@ if st.button("Generate Historical Timeline Analysis"):
             curr_val = np.nansum(df_h["shares"] * df_h["curr_p"])
             orig_val = np.nansum(item["invested"])
             
-            # Accumulate totals
+            # Accumulate Model totals
             agg_invested += orig_val
-            agg_current_val += curr_val
+            agg_model_val += curr_val
             
             if orig_val > 0:
                 model_ret_pct = (curr_val / orig_val - 1.0) * 100.0
             else:
                 model_ret_pct = 0.0
                 
-            # Benchmark Return
+            # Benchmark Return & Value Accumulation
             spy_ret_pct = 0.0
+            spy_val_now = orig_val # default if no data (no gain/loss)
+            
             try:
                 p_dt = pd.to_datetime(item["date"])
-                # FIX: Ensure spy_hist index is naive (done in _get_spy_history)
                 # Use asof to find closest prior/exact date to avoid issues on weekends
                 idx_loc = spy_hist.index.get_indexer([p_dt], method='nearest')[0]
                 if idx_loc >= 0:
                     spy_start_price = spy_hist.iloc[idx_loc]
                     spy_ret_pct = (current_spy / spy_start_price - 1.0) * 100.0
+                    # For fair comparison: What if we put 'orig_val' into SPY instead?
+                    spy_val_now = orig_val * (current_spy / spy_start_price)
             except Exception as e:
-                # Keep 0.0 if failed
                 pass
-                
+            
+            agg_spy_val += spy_val_now
+            
             plot_points.append({
                 "date": item["date"],
                 "Model Return": model_ret_pct,
@@ -540,14 +545,20 @@ if st.button("Generate Historical Timeline Analysis"):
             st.markdown("### Aggregate Strategy Performance")
             st.caption(f"If you had invested **${sim_amt:,.0f}** every day a plan was created (using the latest plan per day):")
             
-            agg_cols = st.columns(3)
+            agg_cols = st.columns(4)
             
-            agg_pnl = agg_current_val - agg_invested
-            agg_pct = (agg_pnl / agg_invested * 100.0) if agg_invested > 0 else 0.0
+            # Model Stats
+            model_pnl = agg_model_val - agg_invested
+            model_pct = (model_pnl / agg_invested * 100.0) if agg_invested > 0 else 0.0
             
-            agg_cols[0].metric("Total Capital Invested", fmt_money(agg_invested))
-            agg_cols[1].metric("Total Current Value", fmt_money(agg_current_val))
-            agg_cols[2].metric("Total Net Profit", fmt_money(agg_pnl), fmt_pct(agg_pct))
+            # SPY Stats
+            spy_pnl = agg_spy_val - agg_invested
+            spy_pct = (spy_pnl / agg_invested * 100.0) if agg_invested > 0 else 0.0
+            
+            agg_cols[0].metric("Total Invested", fmt_money(agg_invested))
+            agg_cols[1].metric("Current Value (Model)", fmt_money(agg_model_val))
+            agg_cols[2].metric("Total Profit (Model)", fmt_money(model_pnl), fmt_pct(model_pct))
+            agg_cols[3].metric("Total Profit (S&P 500)", fmt_money(spy_pnl), fmt_pct(spy_pct), delta_color="normal")
             
         else:
             st.warning("No data points generated.")

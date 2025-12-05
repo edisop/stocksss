@@ -381,7 +381,7 @@ st.divider()
 # HISTORICAL TIMELINE & BENCHMARK
 # -------------------------------------------------------------------------
 st.header("📅 Historical Performance vs S&P 500")
-st.caption("Calculated using the **adjusted** Top-K, Amount, and Temp settings from above.")
+st.caption("Calculated using the **adjusted** Top-K, Amount, and Temp settings from above. If multiple plans exist for one day (e.g., from testing), only the **latest** one is used.")
 
 if st.button("Generate Historical Timeline Analysis"):
     with st.spinner("Processing all historical plans with current simulation settings..."):
@@ -393,6 +393,17 @@ if st.button("Generate Historical Timeline Analysis"):
         # Sort plans by date
         sorted_plans = sorted(plans, key=lambda x: x.get("created_at_utc", ""))
         
+        # DEDUPLICATION LOGIC: Keep only the latest plan for each 'date' string
+        deduped_map = {}
+        for p in sorted_plans:
+            d_str = p.get("date")
+            if d_str:
+                deduped_map[d_str] = p
+        
+        # Convert back to sorted list based on date string
+        # Assuming YYYY-MM-DD format, sorting strings sorts dates correctly
+        final_plans = sorted(deduped_map.values(), key=lambda x: x.get("date", ""))
+        
         # Pre-fetch SPY history
         spy_hist = _get_spy_history() # Series with DatetimeIndex
         current_spy = spy_hist.iloc[-1] if not spy_hist.empty else 0.0
@@ -400,7 +411,7 @@ if st.button("Generate Historical Timeline Analysis"):
         # Create a progress bar
         prog_bar = st.progress(0)
         
-        for i, p_meta in enumerate(sorted_plans):
+        for i, p_meta in enumerate(final_plans):
             pid = p_meta["plan_id"]
             p_date_str = p_meta.get("date")
             
@@ -431,7 +442,7 @@ if st.button("Generate Historical Timeline Analysis"):
                 "invested": d_sim["shares"] * d_sim["buy_price"]
             })
             
-            prog_bar.progress((i + 1) / len(sorted_plans))
+            prog_bar.progress((i + 1) / len(final_plans))
 
         # 2. Fetch Live Prices for ALL unique tickers found across all history
         live_prices_all = _live_prices(list(all_plan_tickers))

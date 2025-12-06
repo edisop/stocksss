@@ -64,7 +64,8 @@ APP_INFER = os.getenv("MODAL_APP_INFER", "inmemory-latest-infer")
 APP_PLANS = os.getenv("MODAL_APP_PLANS", "inmemory-latest-plans")
 
 CKPT_PATH   = os.getenv("CKPT_PATH", "/vol/models/ckpts/biex_listmle_final.pt")
-TOP_K       = int(os.getenv("TOP_K", "20"))
+# THIS REMAINS 20 for plan creation as requested
+TOP_K       = int(os.getenv("TOP_K", "20")) 
 INVEST_AMT  = float(os.getenv("INVEST_AMT", "1000"))
 TEMP        = float(os.getenv("TEMP", "2.0"))
 TZ_NAME     = os.getenv("TIMEZONE", "Australia/Melbourne")
@@ -319,14 +320,15 @@ with st.expander("🛠️ Adjustment / Simulation Parameters", expanded=True):
     sim_strategy = st.radio(
         "Allocation Strategy", 
         ["Softmax", "Uniform"], 
-        index=0, 
+        index=1, # Default to Uniform as requested
         horizontal=True,
         help="Softmax uses score & temperature to weight stocks. Uniform gives equal money to all Top K stocks."
     )
     
     col_adj1, col_adj2, col_adj3 = st.columns(3)
     
-    sim_k = col_adj1.slider("Top K (Subset)", min_value=1, max_value=max_available_rows, value=min(orig_k, max_available_rows))
+    # Default to 5 as requested, capped by available rows
+    sim_k = col_adj1.slider("Top K (Subset)", min_value=1, max_value=max_available_rows, value=min(5, max_available_rows))
     sim_amt = col_adj2.number_input("Investment Amount ($)", min_value=100.0, value=orig_amt, step=100.0)
     
     # Only show Temp slider if Softmax is chosen

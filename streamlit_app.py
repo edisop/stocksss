@@ -308,6 +308,8 @@ st.subheader(f"Plan Analysis: {sel_plan.get('date', 'n/a')}")
 orig_k = int(sel_plan.get("k", 20))
 orig_amt = float(sel_plan.get("invest_amt", 1000.0))
 orig_temp = float(sel_plan.get("temp", 1.0))
+raw_rows = sel_plan.get("rows", [])
+max_available_rows = len(raw_rows)
 
 # -------------------
 # ADJUSTABLE INPUTS
@@ -324,10 +326,6 @@ with st.expander("🛠️ Adjustment / Simulation Parameters", expanded=True):
     
     col_adj1, col_adj2, col_adj3 = st.columns(3)
     
-    # Limit slider max to available rows in the data blob
-    raw_rows = sel_plan.get("rows", [])
-    max_available_rows = len(raw_rows)
-    
     sim_k = col_adj1.slider("Top K (Subset)", min_value=1, max_value=max_available_rows, value=min(orig_k, max_available_rows))
     sim_amt = col_adj2.number_input("Investment Amount ($)", min_value=100.0, value=orig_amt, step=100.0)
     
@@ -337,6 +335,25 @@ with st.expander("🛠️ Adjustment / Simulation Parameters", expanded=True):
     else:
         sim_temp = 1.0 # Default dummy value, unused in Uniform
         col_adj3.markdown("*(Temp ignored in Uniform mode)*")
+
+# -------------------
+# HIGHLIGHTING SETTINGS
+# -------------------
+with st.expander("🎨 Highlighting / Momentum Settings", expanded=False):
+    st.caption("Customize the definition of 'Red' and 'Yellow' flags in the Detailed Holdings table.")
+    
+    hl_cols = st.columns(3)
+    
+    # User can adjust what "Top N" means for the highlighting logic
+    hl_top_n = hl_cols[0].slider("Elite Rank Threshold (Top N)", min_value=1, max_value=max_available_rows, value=20, help="The fixed rank cut-off used to determine if a stock is 'Elite' (Red/Yellow logic).")
+    
+    # Red Lookback: How many past plans to check
+    hl_red_lookback = hl_cols[1].slider("Red Warning Lookback (Days)", min_value=1, max_value=10, value=3, help="If a stock is not in the Top N of the last X plans, it turns RED.")
+    
+    # Yellow Lookback: How many *latest* plans count as 'Active'
+    # Default 1 means "Latest Plan". 2 means "Latest or Yesterday".
+    hl_active_lookback = hl_cols[2].slider("Active/White Window (Days)", min_value=1, max_value=hl_red_lookback, value=1, help="If a stock is in the Top N of these most recent Y plans, it stays WHITE (Active). If it falls out of this window but is still in the Red window, it turns YELLOW.")
+
 
 # -------------------
 # RECALCULATE LOGIC
@@ -447,31 +464,39 @@ if st.button("Generate Historical Timeline & Holdings"):
     with st.spinner("Processing plans, calculating holdings, and fetching market data..."):
         
         # --- A. PRE-CALCULATE 'ACTIVE' UNIVERSES FOR HIGHLIGHTING ---
-        # DEFINITION OF ELITE: Fixed Top 20 regardless of slider sim_k
-        ELITE_K = 20
+        # DEFINITION OF ELITE: Fixed Top N (hl_top_n) from Slider
         
-        latest_universe_fixed: Set[str] = set()
-        recent_universe_fixed: Set[str] = set()
+        # 1. Broad Window (Red Logic): last 'hl_red_lookback' plans
+        universe_broad_window: Set[str] = set()
         
-        # Get last 3 plans from the FULL list (not just active)
-        subset_for_highlights = final_plans[-3:] if len(final_plans) >= 3 else final_plans
+        # 2. Active Window (Yellow/White Logic): last 'hl_active_lookback' plans
+        universe_active_window: Set[str] = set()
         
-        for idx, p_meta in enumerate(subset_for_highlights):
-            blob = get_plan_fn.remote(p_meta["plan_id"])
-            if not blob: continue
-            raw = pd.DataFrame(blob.get("rows", []))
-            if raw.empty: continue
+        # We need the last X plans from the FULL list (final_plans), not just active_plans range
+        total_count = len(final_plans)
+        
+        # Identify start indices for slices
+        start_idx_broad = max(0, total_count - hl_red_lookback)
+        start_idx_active = max(0, total_count - hl_active_lookback)
+        
+        broad_slice = final_plans[start_idx_broad:]
+        active_slice = final_plans[start_idx_active:]
+        
+        # Helper to extract Top N set
+        def get_top_n_set(plan_metas, n):
+            s = set()
+            for pm in plan_metas:
+                blob = get_plan_fn.remote(pm["plan_id"])
+                if not blob: continue
+                raw = pd.DataFrame(blob.get("rows", []))
+                if raw.empty: continue
+                # Sort by raw score to get independent elite ranking
+                raw_sorted = raw.sort_values(by="score", ascending=False).head(n)
+                s.update(raw_sorted["ticker"].tolist())
+            return s
             
-            # Sort by raw score to get the true model ranking, independent of Strategy/Allocation
-            # Just take the top 20 rows
-            raw_sorted = raw.sort_values(by="score", ascending=False).head(ELITE_K)
-            top_tickers = set(raw_sorted["ticker"].tolist())
-            
-            recent_universe_fixed.update(top_tickers)
-            
-            # If this is the absolute latest plan
-            if idx == len(subset_for_highlights) - 1:
-                latest_universe_fixed = top_tickers
+        universe_broad_window = get_top_n_set(broad_slice, hl_top_n)
+        universe_active_window = get_top_n_set(active_slice, hl_top_n)
 
         # --- B. PROCESS ACTIVE PLANS FOR TIMELINE & HOLDINGS ---
         
@@ -599,11 +624,12 @@ if st.button("Generate Historical Timeline & Holdings"):
         # --- G. DETAILED HOLDINGS TABLE ---
         st.divider()
         st.subheader("📦 Detailed Portfolio Holdings")
-        st.caption("Aggregated holdings from the selected start date. Logic for highlighting (based on **Fixed Top 20**):")
+        st.caption(f"Aggregated holdings from the selected start date. Logic for highlighting (based on **Fixed Top {hl_top_n}**):")
+        
         st.markdown(f"""
-        - <span style='background-color: #ffcccc; padding: 2px 4px; border-radius: 4px; color: black;'>Red</span>: Stock is **NOT** in the Fixed Top 20 of the last 3 available plans (approx 3 weekdays).
-        - <span style='background-color: #fff9c4; padding: 2px 4px; border-radius: 4px; color: black;'>Yellow</span>: Stock is **NOT** in the Fixed Top 20 of the *latest* plan (but is in the last 3).
-        - **White**: Stock is currently in the Fixed Top 20 of the latest plan.
+        - <span style='background-color: #ffcccc; padding: 2px 4px; border-radius: 4px; color: black;'>Red</span>: Stock is **NOT** in the Fixed Top {hl_top_n} of the last **{hl_red_lookback}** available plans.
+        - <span style='background-color: #fff9c4; padding: 2px 4px; border-radius: 4px; color: black;'>Yellow</span>: Stock is **NOT** in the Fixed Top {hl_top_n} of the last **{hl_active_lookback}** plan(s) (but is in the last {hl_red_lookback}).
+        - **White**: Stock is currently in the Fixed Top {hl_top_n} of the last **{hl_active_lookback}** plan(s).
         """, unsafe_allow_html=True)
         
         if portfolio_holdings:
@@ -616,10 +642,19 @@ if st.button("Generate Historical Timeline & Holdings"):
                 pnl = curr_val - invested
                 pnl_pct = (pnl / invested * 100.0) if invested > 0 else 0.0
                 
-                # Determine Status for Coloring using the FIXED Top 20 sets
-                if t not in recent_universe_fixed:
+                # Determine Status for Coloring using the FIXED Top N sets
+                
+                # Logic:
+                # 1. Broad Window = Red Lookback (e.g. 3 days)
+                # 2. Active Window = Active Lookback (e.g. 1 or 2 days)
+                
+                # If NOT in broad window -> RED
+                # Else If NOT in active window (but is in broad) -> YELLOW
+                # Else (is in active window) -> WHITE/GREEN
+                
+                if t not in universe_broad_window:
                     status = "Sell/Drop (Red)"
-                elif t not in latest_universe_fixed:
+                elif t not in universe_active_window:
                     status = "Warning (Yellow)"
                 else:
                     status = "Active (Green)"
@@ -665,6 +700,6 @@ st.markdown("#### Notes")
 st.markdown("""
 - A new plan is created **once per day** at ~9:00 in Australia/Melbourne time.
 - **Top K, Temp, and Amount** are simulation parameters applied to historical raw scores.
-- **Red/Yellow highlights** indicate momentum shifts based on the **Fixed Top 20** of the last 3 available plans (regardless of your simulated K).
+- **Red/Yellow highlights** indicate momentum shifts based on the **Fixed Top N** rankings, separate from your investment simulation.
 - Not financial advice.
 """)

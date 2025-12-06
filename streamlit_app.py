@@ -4,6 +4,7 @@
 # - Every run: show a dropdown of all plans (oldest -> latest), default to latest.
 # - For the selected plan: Allows adjusting K, Amount, Temp, AND Strategy (Softmax vs Uniform).
 # - Bottom section: Historical timeline with Date Filter, Aggregate Stats, and Detailed Holdings.
+#   (Automatically generated, no button click required).
 #
 # Required secrets in Streamlit Cloud (Settings → Secrets):
 #   MODAL_TOKEN_ID=...
@@ -462,241 +463,241 @@ active_plans = [p for p in final_plans if datetime.strptime(p["date"], "%Y-%m-%d
 st.caption(f"Simulating investment from **{start_date}** to **{max_date}** ({len(active_plans)} trading days).")
 st.caption(f"Using Strategy: **{sim_strategy}**, K={sim_k}, Amt=${sim_amt}.")
 
-if st.button("Generate Historical Timeline & Holdings"):
-    with st.spinner("Processing plans, calculating holdings, and fetching market data..."):
-        
-        # --- A. PRE-CALCULATE 'ACTIVE' UNIVERSES FOR HIGHLIGHTING ---
-        # DEFINITION OF ELITE: Fixed Top N (hl_top_n) from Slider
-        
-        # 1. Broad Window (Red Logic): last 'hl_red_lookback' plans
-        universe_broad_window: Set[str] = set()
-        
-        # 2. Active Window (Yellow/White Logic): last 'hl_active_lookback' plans
-        universe_active_window: Set[str] = set()
-        
-        # We need the last X plans from the FULL list (final_plans), not just active_plans range
-        total_count = len(final_plans)
-        
-        # Identify start indices for slices
-        start_idx_broad = max(0, total_count - hl_red_lookback)
-        start_idx_active = max(0, total_count - hl_active_lookback)
-        
-        broad_slice = final_plans[start_idx_broad:]
-        active_slice = final_plans[start_idx_active:]
-        
-        # Helper to extract Top N set
-        def get_top_n_set(plan_metas, n):
-            s = set()
-            for pm in plan_metas:
-                blob = get_plan_fn.remote(pm["plan_id"])
-                if not blob: continue
-                raw = pd.DataFrame(blob.get("rows", []))
-                if raw.empty: continue
-                # Sort by raw score to get independent elite ranking
-                raw_sorted = raw.sort_values(by="score", ascending=False).head(n)
-                s.update(raw_sorted["ticker"].tolist())
-            return s
-            
-        universe_broad_window = get_top_n_set(broad_slice, hl_top_n)
-        universe_active_window = get_top_n_set(active_slice, hl_top_n)
-
-        # --- B. PROCESS ACTIVE PLANS FOR TIMELINE & HOLDINGS ---
-        
-        history_data = []
-        all_tickers_involved = set()
-        
-        # Accumulator for holdings: {ticker: {'shares': 0.0, 'invested': 0.0}}
-        portfolio_holdings = {}
-
-        spy_hist = _get_spy_history()
-        current_spy = spy_hist.iloc[-1] if not spy_hist.empty else 0.0
-
-        prog_bar = st.progress(0)
-        
-        for i, p_meta in enumerate(active_plans):
-            pid = p_meta["plan_id"]
-            blob = get_plan_fn.remote(pid)
+# Automatically generated logic (No Button)
+with st.spinner("Processing plans, calculating holdings, and fetching market data..."):
+    
+    # --- A. PRE-CALCULATE 'ACTIVE' UNIVERSES FOR HIGHLIGHTING ---
+    # DEFINITION OF ELITE: Fixed Top N (hl_top_n) from Slider
+    
+    # 1. Broad Window (Red Logic): last 'hl_red_lookback' plans
+    universe_broad_window: Set[str] = set()
+    
+    # 2. Active Window (Yellow/White Logic): last 'hl_active_lookback' plans
+    universe_active_window: Set[str] = set()
+    
+    # We need the last X plans from the FULL list (final_plans), not just active_plans range
+    total_count = len(final_plans)
+    
+    # Identify start indices for slices
+    start_idx_broad = max(0, total_count - hl_red_lookback)
+    start_idx_active = max(0, total_count - hl_active_lookback)
+    
+    broad_slice = final_plans[start_idx_broad:]
+    active_slice = final_plans[start_idx_active:]
+    
+    # Helper to extract Top N set
+    def get_top_n_set(plan_metas, n):
+        s = set()
+        for pm in plan_metas:
+            blob = get_plan_fn.remote(pm["plan_id"])
             if not blob: continue
-            
-            rows = blob.get("rows", [])
-            if not rows: continue
-            
-            d_rows = pd.DataFrame(rows)
-            d_rows["buy_price"] = pd.to_numeric(d_rows["buy_price"], errors="coerce").fillna(0)
-            d_rows["score"]     = pd.to_numeric(d_rows["score"], errors="coerce")
+            raw = pd.DataFrame(blob.get("rows", []))
+            if raw.empty: continue
+            # Sort by raw score to get independent elite ranking
+            raw_sorted = raw.sort_values(by="score", ascending=False).head(n)
+            s.update(raw_sorted["ticker"].tolist())
+        return s
+        
+    universe_broad_window = get_top_n_set(broad_slice, hl_top_n)
+    universe_active_window = get_top_n_set(active_slice, hl_top_n)
 
-            # Apply Simulation Settings (With Strategy and user's chosen K)
-            d_sim = recalculate_metrics(d_rows, sim_k, sim_temp, sim_amt, strategy=sim_strategy)
-            
-            plan_tickers = d_sim["ticker"].unique().tolist()
-            all_tickers_involved.update(plan_tickers)
-            
-            # Update Portfolio Holdings
-            for row in d_sim.itertuples():
-                if row.shares > 0:
-                    if row.ticker not in portfolio_holdings:
-                        portfolio_holdings[row.ticker] = {'shares': 0.0, 'invested': 0.0}
-                    portfolio_holdings[row.ticker]['shares'] += row.shares
-                    portfolio_holdings[row.ticker]['invested'] += (row.shares * row.buy_price)
+    # --- B. PROCESS ACTIVE PLANS FOR TIMELINE & HOLDINGS ---
+    
+    history_data = []
+    all_tickers_involved = set()
+    
+    # Accumulator for holdings: {ticker: {'shares': 0.0, 'invested': 0.0}}
+    portfolio_holdings = {}
 
-            history_data.append({
-                "date": p_meta.get("date"),
-                "df": d_sim,
-                "invested": d_sim["shares"] * d_sim["buy_price"]
+    spy_hist = _get_spy_history()
+    current_spy = spy_hist.iloc[-1] if not spy_hist.empty else 0.0
+
+    prog_bar = st.progress(0)
+    
+    for i, p_meta in enumerate(active_plans):
+        pid = p_meta["plan_id"]
+        blob = get_plan_fn.remote(pid)
+        if not blob: continue
+        
+        rows = blob.get("rows", [])
+        if not rows: continue
+        
+        d_rows = pd.DataFrame(rows)
+        d_rows["buy_price"] = pd.to_numeric(d_rows["buy_price"], errors="coerce").fillna(0)
+        d_rows["score"]     = pd.to_numeric(d_rows["score"], errors="coerce")
+
+        # Apply Simulation Settings (With Strategy and user's chosen K)
+        d_sim = recalculate_metrics(d_rows, sim_k, sim_temp, sim_amt, strategy=sim_strategy)
+        
+        plan_tickers = d_sim["ticker"].unique().tolist()
+        all_tickers_involved.update(plan_tickers)
+        
+        # Update Portfolio Holdings
+        for row in d_sim.itertuples():
+            if row.shares > 0:
+                if row.ticker not in portfolio_holdings:
+                    portfolio_holdings[row.ticker] = {'shares': 0.0, 'invested': 0.0}
+                portfolio_holdings[row.ticker]['shares'] += row.shares
+                portfolio_holdings[row.ticker]['invested'] += (row.shares * row.buy_price)
+
+        history_data.append({
+            "date": p_meta.get("date"),
+            "df": d_sim,
+            "invested": d_sim["shares"] * d_sim["buy_price"]
+        })
+        
+        prog_bar.progress((i + 1) / len(active_plans))
+
+    # --- C. FETCH LIVE PRICES ---
+    all_tickers_involved.update(portfolio_holdings.keys())
+    live_prices_all = _live_prices(list(all_tickers_involved))
+    
+    # --- D. TIMELINE PLOT DATA ---
+    plot_points = []
+    agg_invested = 0.0
+    agg_model_val = 0.0
+    agg_spy_val = 0.0
+    
+    for item in history_data:
+        df_h = item["df"]
+        df_h["curr_p"] = df_h["ticker"].map(live_prices_all).astype(float)
+        curr_val = np.nansum(df_h["shares"] * df_h["curr_p"])
+        orig_val = np.nansum(item["invested"])
+        
+        agg_invested += orig_val
+        agg_model_val += curr_val
+        
+        model_ret_pct = (curr_val / orig_val - 1.0) * 100.0 if orig_val > 0 else 0.0
+        
+        # Benchmark
+        spy_ret_pct = 0.0
+        spy_val_now = orig_val
+        try:
+            p_dt = pd.to_datetime(item["date"])
+            idx_loc = spy_hist.index.get_indexer([p_dt], method='nearest')[0]
+            if idx_loc >= 0:
+                spy_start_price = spy_hist.iloc[idx_loc]
+                spy_ret_pct = (current_spy / spy_start_price - 1.0) * 100.0
+                spy_val_now = orig_val * (current_spy / spy_start_price)
+        except:
+            pass
+        
+        agg_spy_val += spy_val_now
+        
+        plot_points.append({
+            "date": item["date"],
+            "Model Return": model_ret_pct,
+            "S&P 500 Return": spy_ret_pct,
+            "Details": f"Date: {item['date']}<br>Invested: ${orig_val:,.0f}<br>Current: ${curr_val:,.0f}"
+        })
+        
+    # --- E. PLOTTING ---
+    if plot_points:
+        df_plot = pd.DataFrame(plot_points)
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=df_plot["date"], y=df_plot["Model Return"], name="Model Plan Return",
+            marker_color='indianred', hovertemplate="%{text}<br>Model: %{y:.2f}%",
+            text=df_plot["Details"], textposition='none'
+        ))
+        fig.add_trace(go.Scatter(
+            x=df_plot["date"], y=df_plot["S&P 500 Return"], name="S&P 500",
+            mode='lines+markers', line=dict(color='royalblue', width=2), marker=dict(size=6)
+        ))
+        fig.update_layout(
+            title=f"Daily Plan Performance ({start_date} to {max_date}) - {sim_strategy} Mode",
+            xaxis_title="Date", yaxis_title="Return (%)", hovermode="x unified",
+            xaxis=dict(tickformat="%b %d", dtick="D1")
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # --- F. AGGREGATE STATS ---
+        st.markdown("### Aggregate Strategy Performance")
+        agg_cols = st.columns(4)
+        model_pnl = agg_model_val - agg_invested
+        model_pct = (model_pnl / agg_invested * 100.0) if agg_invested > 0 else 0.0
+        spy_pnl = agg_spy_val - agg_invested
+        spy_pct = (spy_pnl / agg_invested * 100.0) if agg_invested > 0 else 0.0
+        
+        agg_cols[0].metric("Total Capital Invested", fmt_money(agg_invested))
+        agg_cols[1].metric("Current Value (Model)", fmt_money(agg_model_val))
+        agg_cols[2].metric("Total Profit (Model)", fmt_money(model_pnl), fmt_pct(model_pct))
+        agg_cols[3].metric("Total Profit (S&P 500)", fmt_money(spy_pnl), fmt_pct(spy_pct))
+
+    # --- G. DETAILED HOLDINGS TABLE ---
+    st.divider()
+    st.subheader("📦 Detailed Portfolio Holdings")
+    st.caption(f"Aggregated holdings from the selected start date. Logic for highlighting (based on **Fixed Top {hl_top_n}**):")
+    
+    st.markdown(f"""
+    - <span style='background-color: #ffcccc; padding: 2px 4px; border-radius: 4px; color: black;'>Red</span>: Stock is **NOT** in the Fixed Top {hl_top_n} of the last **{hl_red_lookback}** available plans.
+    - <span style='background-color: #fff9c4; padding: 2px 4px; border-radius: 4px; color: black;'>Yellow</span>: Stock is **NOT** in the Fixed Top {hl_top_n} of the last **{hl_active_lookback}** plan(s) (but is in the last {hl_red_lookback}).
+    - **White**: Stock is currently in the Fixed Top {hl_top_n} of the last **{hl_active_lookback}** plan(s).
+    """, unsafe_allow_html=True)
+    
+    if portfolio_holdings:
+        holdings_list = []
+        for t, data in portfolio_holdings.items():
+            curr_p = live_prices_all.get(t, 0.0)
+            shares = data['shares']
+            invested = data['invested']
+            curr_val = shares * curr_p
+            pnl = curr_val - invested
+            pnl_pct = (pnl / invested * 100.0) if invested > 0 else 0.0
+            
+            # Determine Status for Coloring using the FIXED Top N sets
+            
+            # Logic:
+            # 1. Broad Window = Red Lookback (e.g. 3 days)
+            # 2. Active Window = Active Lookback (e.g. 1 or 2 days)
+            
+            # If NOT in broad window -> RED
+            # Else If NOT in active window (but is in broad) -> YELLOW
+            # Else (is in active window) -> WHITE/GREEN
+            
+            if t not in universe_broad_window:
+                status = "Sell/Drop (Red)"
+            elif t not in universe_active_window:
+                status = "Warning (Yellow)"
+            else:
+                status = "Active (Green)"
+            
+            holdings_list.append({
+                "Ticker": t,
+                "Total Shares": shares,
+                "Total Invested": invested,
+                "Current Price": curr_p,
+                "Current Value": curr_val,
+                "P&L ($)": pnl,
+                "P&L (%)": pnl_pct,
+                "Status": status
             })
-            
-            prog_bar.progress((i + 1) / len(active_plans))
+        
+        df_holdings = pd.DataFrame(holdings_list)
+        
+        # Styling function
+        def highlight_status(row):
+            s = row["Status"]
+            if s == "Sell/Drop (Red)":
+                return ['background-color: #ffcccc; color: black'] * len(row)
+            elif s == "Warning (Yellow)":
+                return ['background-color: #fff9c4; color: black'] * len(row)
+            else:
+                return [''] * len(row)
 
-        # --- C. FETCH LIVE PRICES ---
-        all_tickers_involved.update(portfolio_holdings.keys())
-        live_prices_all = _live_prices(list(all_tickers_involved))
+        # Apply formatting
+        df_styled = df_holdings.style.apply(highlight_status, axis=1).format({
+            "Total Shares": "{:.4f}",
+            "Total Invested": "${:,.2f}",
+            "Current Price": "${:,.2f}",
+            "Current Value": "${:,.2f}",
+            "P&L ($)": "${:,.2f}",
+            "P&L (%)": "{:.2f}%"
+        })
         
-        # --- D. TIMELINE PLOT DATA ---
-        plot_points = []
-        agg_invested = 0.0
-        agg_model_val = 0.0
-        agg_spy_val = 0.0
-        
-        for item in history_data:
-            df_h = item["df"]
-            df_h["curr_p"] = df_h["ticker"].map(live_prices_all).astype(float)
-            curr_val = np.nansum(df_h["shares"] * df_h["curr_p"])
-            orig_val = np.nansum(item["invested"])
-            
-            agg_invested += orig_val
-            agg_model_val += curr_val
-            
-            model_ret_pct = (curr_val / orig_val - 1.0) * 100.0 if orig_val > 0 else 0.0
-            
-            # Benchmark
-            spy_ret_pct = 0.0
-            spy_val_now = orig_val
-            try:
-                p_dt = pd.to_datetime(item["date"])
-                idx_loc = spy_hist.index.get_indexer([p_dt], method='nearest')[0]
-                if idx_loc >= 0:
-                    spy_start_price = spy_hist.iloc[idx_loc]
-                    spy_ret_pct = (current_spy / spy_start_price - 1.0) * 100.0
-                    spy_val_now = orig_val * (current_spy / spy_start_price)
-            except:
-                pass
-            
-            agg_spy_val += spy_val_now
-            
-            plot_points.append({
-                "date": item["date"],
-                "Model Return": model_ret_pct,
-                "S&P 500 Return": spy_ret_pct,
-                "Details": f"Date: {item['date']}<br>Invested: ${orig_val:,.0f}<br>Current: ${curr_val:,.0f}"
-            })
-            
-        # --- E. PLOTTING ---
-        if plot_points:
-            df_plot = pd.DataFrame(plot_points)
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=df_plot["date"], y=df_plot["Model Return"], name="Model Plan Return",
-                marker_color='indianred', hovertemplate="%{text}<br>Model: %{y:.2f}%",
-                text=df_plot["Details"], textposition='none'
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_plot["date"], y=df_plot["S&P 500 Return"], name="S&P 500",
-                mode='lines+markers', line=dict(color='royalblue', width=2), marker=dict(size=6)
-            ))
-            fig.update_layout(
-                title=f"Daily Plan Performance ({start_date} to {max_date}) - {sim_strategy} Mode",
-                xaxis_title="Date", yaxis_title="Return (%)", hovermode="x unified",
-                xaxis=dict(tickformat="%b %d", dtick="D1")
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # --- F. AGGREGATE STATS ---
-            st.markdown("### Aggregate Strategy Performance")
-            agg_cols = st.columns(4)
-            model_pnl = agg_model_val - agg_invested
-            model_pct = (model_pnl / agg_invested * 100.0) if agg_invested > 0 else 0.0
-            spy_pnl = agg_spy_val - agg_invested
-            spy_pct = (spy_pnl / agg_invested * 100.0) if agg_invested > 0 else 0.0
-            
-            agg_cols[0].metric("Total Capital Invested", fmt_money(agg_invested))
-            agg_cols[1].metric("Current Value (Model)", fmt_money(agg_model_val))
-            agg_cols[2].metric("Total Profit (Model)", fmt_money(model_pnl), fmt_pct(model_pct))
-            agg_cols[3].metric("Total Profit (S&P 500)", fmt_money(spy_pnl), fmt_pct(spy_pct))
-
-        # --- G. DETAILED HOLDINGS TABLE ---
-        st.divider()
-        st.subheader("📦 Detailed Portfolio Holdings")
-        st.caption(f"Aggregated holdings from the selected start date. Logic for highlighting (based on **Fixed Top {hl_top_n}**):")
-        
-        st.markdown(f"""
-        - <span style='background-color: #ffcccc; padding: 2px 4px; border-radius: 4px; color: black;'>Red</span>: Stock is **NOT** in the Fixed Top {hl_top_n} of the last **{hl_red_lookback}** available plans.
-        - <span style='background-color: #fff9c4; padding: 2px 4px; border-radius: 4px; color: black;'>Yellow</span>: Stock is **NOT** in the Fixed Top {hl_top_n} of the last **{hl_active_lookback}** plan(s) (but is in the last {hl_red_lookback}).
-        - **White**: Stock is currently in the Fixed Top {hl_top_n} of the last **{hl_active_lookback}** plan(s).
-        """, unsafe_allow_html=True)
-        
-        if portfolio_holdings:
-            holdings_list = []
-            for t, data in portfolio_holdings.items():
-                curr_p = live_prices_all.get(t, 0.0)
-                shares = data['shares']
-                invested = data['invested']
-                curr_val = shares * curr_p
-                pnl = curr_val - invested
-                pnl_pct = (pnl / invested * 100.0) if invested > 0 else 0.0
-                
-                # Determine Status for Coloring using the FIXED Top N sets
-                
-                # Logic:
-                # 1. Broad Window = Red Lookback (e.g. 3 days)
-                # 2. Active Window = Active Lookback (e.g. 1 or 2 days)
-                
-                # If NOT in broad window -> RED
-                # Else If NOT in active window (but is in broad) -> YELLOW
-                # Else (is in active window) -> WHITE/GREEN
-                
-                if t not in universe_broad_window:
-                    status = "Sell/Drop (Red)"
-                elif t not in universe_active_window:
-                    status = "Warning (Yellow)"
-                else:
-                    status = "Active (Green)"
-                
-                holdings_list.append({
-                    "Ticker": t,
-                    "Total Shares": shares,
-                    "Total Invested": invested,
-                    "Current Price": curr_p,
-                    "Current Value": curr_val,
-                    "P&L ($)": pnl,
-                    "P&L (%)": pnl_pct,
-                    "Status": status
-                })
-            
-            df_holdings = pd.DataFrame(holdings_list)
-            
-            # Styling function
-            def highlight_status(row):
-                s = row["Status"]
-                if s == "Sell/Drop (Red)":
-                    return ['background-color: #ffcccc; color: black'] * len(row)
-                elif s == "Warning (Yellow)":
-                    return ['background-color: #fff9c4; color: black'] * len(row)
-                else:
-                    return [''] * len(row)
-
-            # Apply formatting
-            df_styled = df_holdings.style.apply(highlight_status, axis=1).format({
-                "Total Shares": "{:.4f}",
-                "Total Invested": "${:,.2f}",
-                "Current Price": "${:,.2f}",
-                "Current Value": "${:,.2f}",
-                "P&L ($)": "${:,.2f}",
-                "P&L (%)": "{:.2f}%"
-            })
-            
-            st.dataframe(df_styled, use_container_width=True, hide_index=True)
-        else:
-            st.info("No holdings found for this period.")
+        st.dataframe(df_styled, use_container_width=True, hide_index=True)
+    else:
+        st.info("No holdings found for this period.")
 
 st.markdown("#### Notes")
 st.markdown("""

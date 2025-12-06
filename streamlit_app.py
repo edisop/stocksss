@@ -3,7 +3,7 @@
 # - On startup: ensure there's a plan for today (>= 9am Australia/Melbourne). If none, create once.
 # - Every run: show a dropdown of all plans (oldest -> latest), default to latest.
 # - For the selected plan: Allows adjusting K, Amount, Temp, AND Strategy (Softmax vs Uniform).
-# - Bottom section: Historical timeline with Date Filter, Aggregate Stats, and Detailed Holdings.
+# - Bottom section: Historical timeline with Date Filter, Aggregate Stats, and Detailed Holdings (w/ Finnhub).
 #   (Automatically generated, no button click required).
 #
 # Required secrets in Streamlit Cloud (Settings → Secrets):
@@ -53,7 +53,14 @@ if hasattr(st, 'secrets'):
 try:
     import yfinance as yf
 except ImportError:
-    st.error("`yfinance` is not installed. On Streamlit Cloud, add it to **requirements.txt**. Locally: `pip install yfinance`.")
+    st.error("`yfinance` is not installed. Add it to requirements.txt.")
+    st.stop()
+
+# Finnhub import
+try:
+    import finnhub
+except ImportError:
+    st.error("`finnhub-python` is not installed. Add it to requirements.txt.")
     st.stop()
 
 from modal import Function, App
@@ -71,6 +78,7 @@ INVEST_AMT  = float(os.getenv("INVEST_AMT", "1000"))
 TEMP        = float(os.getenv("TEMP", "2.0"))
 TZ_NAME     = os.getenv("TIMEZONE", "Australia/Melbourne")
 AUTO_CREATE = os.getenv("AUTO_CREATE_ON_START", "1") == "1"
+FINNHUB_KEY = "d2bg5c9r01qrj4ilmpb0d2bg5c9r01qrj4ilmpbg"
 
 TZ = ZoneInfo(TZ_NAME)
 
@@ -173,6 +181,42 @@ def _get_spy_history():
         return hist["Close"]
     except:
         return pd.Series(dtype=float)
+
+@st.cache_data(ttl=3600)  # Cache longer to avoid hitting Finnhub rate limits
+def _get_analyst_trends(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Fetch analyst recommendation trends from Finnhub."""
+    # Free tier rate limit is ~60 calls/minute. We need to be careful.
+    results = {}
+    if not tickers:
+        return results
+        
+    finnhub_client = finnhub.Client(api_key=FINNHUB_KEY)
+    
+    # Process unique tickers only
+    unique_tickers = list(set(tickers))
+    
+    # We'll do a simple loop. 
+    for t in unique_tickers:
+        try:
+            trends = finnhub_client.recommendation_trends(t)
+            if trends and isinstance(trends, list):
+                # SAFE SORT: Ensure we get the latest period "YYYY-MM-DD"
+                trends.sort(key=lambda x: x.get("period", ""), reverse=True)
+                latest = trends[0]
+                results[t] = {
+                    "strongBuy": latest.get("strongBuy", 0),
+                    "buy": latest.get("buy", 0),
+                    "hold": latest.get("hold", 0),
+                    "sell": latest.get("sell", 0),
+                    "strongSell": latest.get("strongSell", 0),
+                    "period": latest.get("period", "")
+                }
+            # Respect rate limit gently
+            time.sleep(0.1) 
+        except Exception as e:
+            pass
+            
+    return results
 
 def mel_now():
     return datetime.now(TZ)
@@ -548,9 +592,10 @@ with st.spinner("Processing plans, calculating holdings, and fetching market dat
         
         prog_bar.progress((i + 1) / len(active_plans))
 
-    # --- C. FETCH LIVE PRICES ---
+    # --- C. FETCH LIVE PRICES & FINNHUB DATA ---
     all_tickers_involved.update(portfolio_holdings.keys())
     live_prices_all = _live_prices(list(all_tickers_involved))
+    finnhub_data_all = _get_analyst_trends(list(all_tickers_involved))
     
     # --- D. TIMELINE PLOT DATA ---
     plot_points = []
@@ -645,16 +690,10 @@ with st.spinner("Processing plans, calculating holdings, and fetching market dat
             pnl = curr_val - invested
             pnl_pct = (pnl / invested * 100.0) if invested > 0 else 0.0
             
+            # Analyst Data
+            a_data = finnhub_data_all.get(t, {})
+            
             # Determine Status for Coloring using the FIXED Top N sets
-            
-            # Logic:
-            # 1. Broad Window = Red Lookback (e.g. 3 days)
-            # 2. Active Window = Active Lookback (e.g. 1 or 2 days)
-            
-            # If NOT in broad window -> RED
-            # Else If NOT in active window (but is in broad) -> YELLOW
-            # Else (is in active window) -> WHITE/GREEN
-            
             if t not in universe_broad_window:
                 status = "Sell/Drop (Red)"
             elif t not in universe_active_window:
@@ -670,7 +709,12 @@ with st.spinner("Processing plans, calculating holdings, and fetching market dat
                 "Current Value": curr_val,
                 "P&L ($)": pnl,
                 "P&L (%)": pnl_pct,
-                "Status": status
+                "Status": status,
+                "Strong Buy": a_data.get("strongBuy", ""),
+                "Buy": a_data.get("buy", ""),
+                "Hold": a_data.get("hold", ""),
+                "Sell": a_data.get("sell", ""),
+                "Strong Sell": a_data.get("strongSell", "")
             })
         
         df_holdings = pd.DataFrame(holdings_list)

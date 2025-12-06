@@ -3,7 +3,7 @@
 # - On startup: ensure there's a plan for today (>= 9am Australia/Melbourne). If none, create once.
 # - Every run: show a dropdown of all plans (oldest -> latest), default to latest.
 # - For the selected plan: Allows adjusting K, Amount, Temp, AND Strategy (Softmax vs Uniform).
-# - Bottom section: Historical timeline with Date Filter, Aggregate Stats, and Detailed Holdings (w/ Finnhub + Yahoo Targets).
+# - Bottom section: Historical timeline with Date Filter, Aggregate Stats, and Detailed Holdings (w/ Finnhub).
 #   (Automatically generated, no button click required).
 #
 # Required secrets in Streamlit Cloud (Settings → Secrets):
@@ -182,7 +182,7 @@ def _get_spy_history():
     except:
         return pd.Series(dtype=float)
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600)  # Cache longer to avoid hitting Finnhub rate limits
 def _get_analyst_trends(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
     """Fetch analyst recommendation trends from Finnhub."""
     # Free tier rate limit is ~60 calls/minute. We need to be careful.
@@ -191,8 +191,11 @@ def _get_analyst_trends(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
         return results
         
     finnhub_client = finnhub.Client(api_key=FINNHUB_KEY)
+    
+    # Process unique tickers only
     unique_tickers = list(set(tickers))
     
+    # We'll do a simple loop. 
     for t in unique_tickers:
         try:
             trends = finnhub_client.recommendation_trends(t)
@@ -208,38 +211,11 @@ def _get_analyst_trends(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
                     "strongSell": latest.get("strongSell", 0),
                     "period": latest.get("period", "")
                 }
+            # Respect rate limit gently
             time.sleep(0.1) 
-        except Exception:
+        except Exception as e:
             pass
             
-    return results
-
-@st.cache_data(ttl=3600)
-def _get_yfinance_targets(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
-    """
-    Fetch granular analyst price targets and consensus from Yahoo Finance.
-    Warning: scraping 'info' is slow (1 request per ticker).
-    """
-    results = {}
-    if not tickers:
-        return results
-        
-    unique_tickers = list(set(tickers))
-    
-    for t in unique_tickers:
-        try:
-            # Ticker.info makes a synchronous HTTP request. 
-            # This will take time for many stocks.
-            info = yf.Ticker(t).info
-            results[t] = {
-                "Target Mean": info.get('targetMeanPrice'),
-                "Target High": info.get('targetHighPrice'),
-                "Target Low": info.get('targetLowPrice'),
-                "Consensus": info.get('recommendationKey')
-            }
-        except Exception:
-            results[t] = {}
-    
     return results
 
 def mel_now():
@@ -441,22 +417,12 @@ df_sim = recalculate_metrics(df_raw, sim_k, sim_temp, sim_amt, strategy=sim_stra
 sim_tickers = df_sim["ticker"].dropna().unique().tolist()
 live = _live_prices(sim_tickers)
 
-# FETCH YAHOO ANALYST TARGETS FOR CURRENT PLAN
-with st.spinner("Fetching Yahoo Finance Analyst Targets..."):
-    yf_targets_single = _get_yfinance_targets(sim_tickers)
-
 # Compute P&L on Simulated Data
 df_sim["current_price"] = df_sim["ticker"].map(live).astype(float)
 df_sim["current_value"] = df_sim["shares"] * df_sim["current_price"]
 df_sim["buy_value"] = df_sim["shares"] * df_sim["buy_price"]
 df_sim["pnl_abs"] = df_sim["current_value"] - df_sim["buy_value"]
 df_sim["pnl_pct"] = (df_sim["current_value"] / df_sim["buy_value"] - 1.0) * 100.0
-
-# Add Targets to Single Plan DataFrame
-df_sim["Target Mean"] = df_sim["ticker"].map(lambda t: yf_targets_single.get(t, {}).get("Target Mean"))
-df_sim["Target High"] = df_sim["ticker"].map(lambda t: yf_targets_single.get(t, {}).get("Target High"))
-df_sim["Target Low"] = df_sim["ticker"].map(lambda t: yf_targets_single.get(t, {}).get("Target Low"))
-df_sim["Consensus"] = df_sim["ticker"].map(lambda t: yf_targets_single.get(t, {}).get("Consensus"))
 
 totals = {
     "buy_value": float(np.nansum(df_sim["buy_value"])),
@@ -478,11 +444,7 @@ kpi[0].metric("Invested", fmt_money(totals["buy_value"]))
 kpi[1].metric("Current Value", fmt_money(totals["current_value"]))
 kpi[2].metric("P/L", fmt_money(totals["pnl_abs"]), fmt_pct(totals["pnl_pct"]))
 
-view_cols = [
-    "rank","ticker","score","weight","allocation","buy_price","shares",
-    "current_price","current_value","pnl_abs","pnl_pct",
-    "Target Mean", "Target High", "Target Low", "Consensus"
-]
+view_cols = ["rank","ticker","score","weight","allocation","buy_price","shares","current_price","current_value","pnl_abs","pnl_pct"]
 # Re-rank based on the sliced view (sorting by weight still works for uniform, rank matches index)
 df_sim = df_sim.sort_values(["weight", "score"], ascending=[False, False]).reset_index(drop=True)
 df_sim["rank"] = df_sim.index + 1
@@ -491,14 +453,14 @@ df_view = df_sim.loc[:, [c for c in view_cols if c in df_sim.columns]].copy()
 
 # Formatting for DataFrame
 fmt_df = df_view.copy()
-for col in ["allocation","buy_price","current_price","current_value","pnl_abs", "Target Mean", "Target High", "Target Low"]:
+for col in ["allocation","buy_price","current_price","current_value","pnl_abs"]:
     if col in fmt_df:
-        fmt_df[col] = fmt_df[col].map(lambda v: fmt_money(float(v)) if pd.notna(v) and v != "" else "")
+        fmt_df[col] = fmt_df[col].map(lambda v: fmt_money(float(v)) if pd.notna(v) else "")
 for col in ["score","weight","shares"]:
     if col in fmt_df:
-        fmt_df[col] = fmt_df[col].map(lambda v: f"{float(v):.4f}" if pd.notna(v) and v != "" else "")
+        fmt_df[col] = fmt_df[col].map(lambda v: f"{float(v):.4f}" if pd.notna(v) else "")
 if "pnl_pct" in fmt_df:
-    fmt_df["pnl_pct"] = fmt_df["pnl_pct"].map(lambda v: fmt_pct(float(v)) if pd.notna(v) and v != "" else "")
+    fmt_df["pnl_pct"] = fmt_df["pnl_pct"].map(lambda v: fmt_pct(float(v)) if pd.notna(v) else "")
 
 st.dataframe(fmt_df, use_container_width=True, hide_index=True)
 st.caption(f"Last refreshed: {mel_now().isoformat()} ({TZ_NAME})")
@@ -630,18 +592,10 @@ with st.spinner("Processing plans, calculating holdings, and fetching market dat
         
         prog_bar.progress((i + 1) / len(active_plans))
 
-    # --- C. FETCH LIVE PRICES, FINNHUB DATA, & YAHOO TARGETS ---
+    # --- C. FETCH LIVE PRICES & FINNHUB DATA ---
     all_tickers_involved.update(portfolio_holdings.keys())
-    
-    # Live Prices
     live_prices_all = _live_prices(list(all_tickers_involved))
-    
-    # Finnhub Trends
     finnhub_data_all = _get_analyst_trends(list(all_tickers_involved))
-    
-    # Yahoo Targets (Heavy Fetch)
-    with st.spinner("Fetching granular analyst targets from Yahoo Finance (this may take time)..."):
-        yf_targets_all = _get_yfinance_targets(list(all_tickers_involved))
     
     # --- D. TIMELINE PLOT DATA ---
     plot_points = []
@@ -736,10 +690,8 @@ with st.spinner("Processing plans, calculating holdings, and fetching market dat
             pnl = curr_val - invested
             pnl_pct = (pnl / invested * 100.0) if invested > 0 else 0.0
             
-            # Analyst Data (Finnhub)
+            # Analyst Data
             a_data = finnhub_data_all.get(t, {})
-            # Analyst Targets (Yahoo)
-            y_data = yf_targets_all.get(t, {})
             
             # Determine Status for Coloring using the FIXED Top N sets
             if t not in universe_broad_window:
@@ -758,17 +710,11 @@ with st.spinner("Processing plans, calculating holdings, and fetching market dat
                 "P&L ($)": pnl,
                 "P&L (%)": pnl_pct,
                 "Status": status,
-                # Finnhub
                 "Strong Buy": a_data.get("strongBuy", ""),
                 "Buy": a_data.get("buy", ""),
                 "Hold": a_data.get("hold", ""),
                 "Sell": a_data.get("sell", ""),
-                "Strong Sell": a_data.get("strongSell", ""),
-                # Yahoo Targets
-                "Target Mean": y_data.get("Target Mean", ""),
-                "Target High": y_data.get("Target High", ""),
-                "Target Low": y_data.get("Target Low", ""),
-                "Consensus": y_data.get("Consensus", "")
+                "Strong Sell": a_data.get("strongSell", "")
             })
         
         df_holdings = pd.DataFrame(holdings_list)
@@ -790,10 +736,7 @@ with st.spinner("Processing plans, calculating holdings, and fetching market dat
             "Current Price": "${:,.2f}",
             "Current Value": "${:,.2f}",
             "P&L ($)": "${:,.2f}",
-            "P&L (%)": "{:.2f}%",
-            "Target Mean": "${:,.2f}",
-            "Target High": "${:,.2f}",
-            "Target Low": "${:,.2f}"
+            "P&L (%)": "{:.2f}%"
         })
         
         st.dataframe(df_styled, use_container_width=True, hide_index=True)

@@ -447,12 +447,11 @@ if st.button("Generate Historical Timeline & Holdings"):
     with st.spinner("Processing plans, calculating holdings, and fetching market data..."):
         
         # --- A. PRE-CALCULATE 'ACTIVE' UNIVERSES FOR HIGHLIGHTING ---
-        # "Latest" = the absolute last plan in the system
-        # "Recent 3" = the last 3 plans in the system
-        # We need to run recalculate_metrics on them to know which stocks made the cut under current settings.
+        # DEFINITION OF ELITE: Fixed Top 20 regardless of slider sim_k
+        ELITE_K = 20
         
-        latest_universe: Set[str] = set()
-        recent_universe: Set[str] = set()
+        latest_universe_fixed: Set[str] = set()
+        recent_universe_fixed: Set[str] = set()
         
         # Get last 3 plans from the FULL list (not just active)
         subset_for_highlights = final_plans[-3:] if len(final_plans) >= 3 else final_plans
@@ -462,13 +461,17 @@ if st.button("Generate Historical Timeline & Holdings"):
             if not blob: continue
             raw = pd.DataFrame(blob.get("rows", []))
             if raw.empty: continue
-            # Must run sim logic to get top K with selected Strategy
-            sim = recalculate_metrics(raw, sim_k, sim_temp, sim_amt, strategy=sim_strategy)
-            top_tickers = set(sim["ticker"].tolist())
             
-            recent_universe.update(top_tickers)
+            # Sort by raw score to get the true model ranking, independent of Strategy/Allocation
+            # Just take the top 20 rows
+            raw_sorted = raw.sort_values(by="score", ascending=False).head(ELITE_K)
+            top_tickers = set(raw_sorted["ticker"].tolist())
+            
+            recent_universe_fixed.update(top_tickers)
+            
+            # If this is the absolute latest plan
             if idx == len(subset_for_highlights) - 1:
-                latest_universe = top_tickers
+                latest_universe_fixed = top_tickers
 
         # --- B. PROCESS ACTIVE PLANS FOR TIMELINE & HOLDINGS ---
         
@@ -495,7 +498,7 @@ if st.button("Generate Historical Timeline & Holdings"):
             d_rows["buy_price"] = pd.to_numeric(d_rows["buy_price"], errors="coerce").fillna(0)
             d_rows["score"]     = pd.to_numeric(d_rows["score"], errors="coerce")
 
-            # Apply Simulation Settings (With Strategy)
+            # Apply Simulation Settings (With Strategy and user's chosen K)
             d_sim = recalculate_metrics(d_rows, sim_k, sim_temp, sim_amt, strategy=sim_strategy)
             
             plan_tickers = d_sim["ticker"].unique().tolist()
@@ -596,11 +599,11 @@ if st.button("Generate Historical Timeline & Holdings"):
         # --- G. DETAILED HOLDINGS TABLE ---
         st.divider()
         st.subheader("📦 Detailed Portfolio Holdings")
-        st.caption("Aggregated holdings from the selected start date. Logic for highlighting:")
+        st.caption("Aggregated holdings from the selected start date. Logic for highlighting (based on **Fixed Top 20**):")
         st.markdown(f"""
-        - <span style='background-color: #ffcccc; padding: 2px 4px; border-radius: 4px; color: black;'>Red</span>: Stock is **NOT** in the Top {sim_k} of the last 3 available plans.
-        - <span style='background-color: #fff9c4; padding: 2px 4px; border-radius: 4px; color: black;'>Yellow</span>: Stock is **NOT** in the Top {sim_k} of the *latest* plan (but is in the last 3).
-        - **White**: Stock is currently in the Top {sim_k} of the latest plan.
+        - <span style='background-color: #ffcccc; padding: 2px 4px; border-radius: 4px; color: black;'>Red</span>: Stock is **NOT** in the Fixed Top 20 of the last 3 available plans (approx 3 weekdays).
+        - <span style='background-color: #fff9c4; padding: 2px 4px; border-radius: 4px; color: black;'>Yellow</span>: Stock is **NOT** in the Fixed Top 20 of the *latest* plan (but is in the last 3).
+        - **White**: Stock is currently in the Fixed Top 20 of the latest plan.
         """, unsafe_allow_html=True)
         
         if portfolio_holdings:
@@ -613,10 +616,10 @@ if st.button("Generate Historical Timeline & Holdings"):
                 pnl = curr_val - invested
                 pnl_pct = (pnl / invested * 100.0) if invested > 0 else 0.0
                 
-                # Determine Status for Coloring
-                if t not in recent_universe:
+                # Determine Status for Coloring using the FIXED Top 20 sets
+                if t not in recent_universe_fixed:
                     status = "Sell/Drop (Red)"
-                elif t not in latest_universe:
+                elif t not in latest_universe_fixed:
                     status = "Warning (Yellow)"
                 else:
                     status = "Active (Green)"
@@ -662,6 +665,6 @@ st.markdown("#### Notes")
 st.markdown("""
 - A new plan is created **once per day** at ~9:00 in Australia/Melbourne time.
 - **Top K, Temp, and Amount** are simulation parameters applied to historical raw scores.
-- **Red/Yellow highlights** indicate momentum shifts based on the Top K set of the last 3 available plans.
+- **Red/Yellow highlights** indicate momentum shifts based on the **Fixed Top 20** of the last 3 available plans (regardless of your simulated K).
 - Not financial advice.
 """)

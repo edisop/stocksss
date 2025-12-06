@@ -417,7 +417,7 @@ df_sim = recalculate_metrics(df_raw, sim_k, sim_temp, sim_amt, strategy=sim_stra
 sim_tickers = df_sim["ticker"].dropna().unique().tolist()
 live = _live_prices(sim_tickers)
 
-# FETCH ANALYST TRENDS FOR SINGLE PLAN
+# FETCH ANALYST TRENDS FOR SINGLE PLAN (NEW)
 with st.spinner("Fetching Analyst Recommendation Trends..."):
     finnhub_single_data = _get_analyst_trends(sim_tickers)
 
@@ -458,7 +458,7 @@ kpi[2].metric("P/L", fmt_money(totals["pnl_abs"]), fmt_pct(totals["pnl_pct"]))
 view_cols = [
     "rank","ticker","score","weight","allocation","buy_price","shares",
     "current_price","current_value","pnl_abs","pnl_pct",
-    "Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"
+    "Strong Buy", "Buy", "Hold", "Sell", "Strong Sell" # Added these
 ]
 # Re-rank based on the sliced view (sorting by weight still works for uniform, rank matches index)
 df_sim = df_sim.sort_values(["weight", "score"], ascending=[False, False]).reset_index(drop=True)

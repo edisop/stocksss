@@ -417,12 +417,23 @@ df_sim = recalculate_metrics(df_raw, sim_k, sim_temp, sim_amt, strategy=sim_stra
 sim_tickers = df_sim["ticker"].dropna().unique().tolist()
 live = _live_prices(sim_tickers)
 
+# FETCH ANALYST TRENDS FOR SINGLE PLAN
+with st.spinner("Fetching Analyst Recommendation Trends..."):
+    finnhub_single_data = _get_analyst_trends(sim_tickers)
+
 # Compute P&L on Simulated Data
 df_sim["current_price"] = df_sim["ticker"].map(live).astype(float)
 df_sim["current_value"] = df_sim["shares"] * df_sim["current_price"]
 df_sim["buy_value"] = df_sim["shares"] * df_sim["buy_price"]
 df_sim["pnl_abs"] = df_sim["current_value"] - df_sim["buy_value"]
 df_sim["pnl_pct"] = (df_sim["current_value"] / df_sim["buy_value"] - 1.0) * 100.0
+
+# Add Finnhub Data columns
+df_sim["Strong Buy"] = df_sim["ticker"].map(lambda t: finnhub_single_data.get(t, {}).get("strongBuy", ""))
+df_sim["Buy"]        = df_sim["ticker"].map(lambda t: finnhub_single_data.get(t, {}).get("buy", ""))
+df_sim["Hold"]       = df_sim["ticker"].map(lambda t: finnhub_single_data.get(t, {}).get("hold", ""))
+df_sim["Sell"]       = df_sim["ticker"].map(lambda t: finnhub_single_data.get(t, {}).get("sell", ""))
+df_sim["Strong Sell"]= df_sim["ticker"].map(lambda t: finnhub_single_data.get(t, {}).get("strongSell", ""))
 
 totals = {
     "buy_value": float(np.nansum(df_sim["buy_value"])),
@@ -444,7 +455,11 @@ kpi[0].metric("Invested", fmt_money(totals["buy_value"]))
 kpi[1].metric("Current Value", fmt_money(totals["current_value"]))
 kpi[2].metric("P/L", fmt_money(totals["pnl_abs"]), fmt_pct(totals["pnl_pct"]))
 
-view_cols = ["rank","ticker","score","weight","allocation","buy_price","shares","current_price","current_value","pnl_abs","pnl_pct"]
+view_cols = [
+    "rank","ticker","score","weight","allocation","buy_price","shares",
+    "current_price","current_value","pnl_abs","pnl_pct",
+    "Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"
+]
 # Re-rank based on the sliced view (sorting by weight still works for uniform, rank matches index)
 df_sim = df_sim.sort_values(["weight", "score"], ascending=[False, False]).reset_index(drop=True)
 df_sim["rank"] = df_sim.index + 1
